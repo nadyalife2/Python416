@@ -3262,5 +3262,8 @@ import re
 #
 # print(validate_login("Python_master"))
 # print(validate_login("Pyt"))
-print("Доброго времени. Git готов")
-print("х_х")
+# print("Доброго времени. Git готов")
+# print("х_х")
+
+
+print("Код написан на новом устройстве")
