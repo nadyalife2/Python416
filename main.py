@@ -3266,4 +3266,17 @@ import re
 # print("х_х")
 
 
-print("Код написан на новом устройстве")
+# print("Код написан на новом устройстве")
+
+
+
+f=open(r"C:\python\dz\Python416\text.txt")
+print(*f)
+print(f)
+print(f.mode)
+print(f.name)
+print(f.encoding)
+
+
+f.close()
+print(f.closed)
