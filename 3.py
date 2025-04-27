@@ -1,39 +1,24 @@
-from math import sqrt
+class Student:
+    def __init__(self, name):
+        self.name = name
+        self.note = self.Notebook()
+
+    def show(self):
+        print(self.name, end="")
+        self.note.show()
+
+    class Notebook:
+        def __init__(self):
+            self.brand = "HP"
+            self.cpu = 'i7'
+            self.ram = 16
+
+        def show(self):
+            print(f" => {self.brand}, {self.cpu}, {self.ram}")
 
 
-class Area:
-    __count=0
+s1 = Student("Roman")
+s2 = Student("Vladimir")
 
-    @staticmethod
-    def triangle_area(a,b,c):
-        p=(a+b+c)/2
-        Area.__count+=1
-        return sqrt(p*(p-a)*(p-b)*(p-c))
-
-    @staticmethod
-    def triangle_area_2(a,h):
-        Area.__count += 1
-        return 0.5*a*h
-
-    @staticmethod
-    def square_area(a):
-        Area.__count += 1
-        return a**2
-
-    @staticmethod
-    def rectangle_area(a, b):
-        Area.__count += 1
-        return a * b
-
-    @staticmethod
-    def get_count():
-        return Area.__count
-
-
-
-
-print("Площадь треугольника по формуле Герона", Area.triangle_area(3,4,5))
-print("Площадь треугольника через основание и высоту (6,7)", Area.triangle_area_2(6, 7))
-print("Площадь квадрата (7): ", Area.square_area(7))
-print("Площадь прямоугольника (2, 6): ", Area.rectangle_area(2,6))
-print("Количество подсчетов площади: ", Area.get_count())
+s1.show()
+s2.show()
