@@ -1,0 +1,17 @@
+ErrorDocument 403 /404.html
+ErrorDocument 404 /404.html
+
+DirectoryIndex page64953395.html
+
+AuthType Basic
+AuthName "Restricted Area"
+AuthUserFile /var/www/tilda/data/www/tilda.ws/.htpasswd
+require valid-user
+Order deny,allow
+Deny from all
+Satisfy any
+RewriteRule ^ - [co=nocache:true:.:1:/]
+
+RewriteEngine On
+
+
