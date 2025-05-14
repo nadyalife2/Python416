@@ -6,5 +6,4 @@ class CarClass:
         self.run=run
 
 
-    def show_car(self):
-        print(f"{self.brand}, {self.model},{self.year}год,{self.run}км")
+    def show_car(self):  
