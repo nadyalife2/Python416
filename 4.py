@@ -1,37 +1,42 @@
-class Rect:
-    def __init__(self, width, height):
-        self.width = width
-        self.height = height
-
-    def show_rect(self):
-        print(f"Прямоугольник:\nШирина: {self.width}\nВысота: {self.height}")
-
-class RectFon(Rect):
-    def __init__(self, width, height, background):
-        super().__init__(width, height)
-        self.fon = background
-
-    def show_rect(self):
-        super().show_rect()
-        print("Фон:", self.fon)
+import json
+from random import choice
 
 
-class RectBorder(Rect):
-    def __init__(self, width, height, thin, typed, color):
-        super().__init__(width, height)
-        self.thin = thin
-        self.typed = typed
-        self.color = color
+def gen_person():
+    name = ''
+    tel = ''
 
-    def show_rect(self):
-        super().show_rect()
-        print("Толщина рамки:", self.thin)
-        print("Тип рамки:", self.typed)
-        print("Цвет рамки:", self.color)
+    letters = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+    nums = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']
+
+    while len(name) != 7:
+        name += choice(letters)
+    # print(name)
+
+    while len(tel) != 10:
+        tel += choice(nums)
+    # print(tel)
+
+    person = {
+        'name': name,
+        'tel': tel
+    }
+
+    return person, tel
 
 
-shape1 = RectFon(400, 200, "yellow")
-shape1.show_rect()
-print()
-shape2 = RectBorder(600, 300, "1px", "solid", "blue")
-shape2.show_rect()
+def write_json(person_dict, num):  # {'name': ..., 'tel': ...}
+    try:
+        data = json.load(open("persons1.json"))
+    except FileNotFoundError:
+        data = {}
+
+    data[num] = person_dict
+
+    with open("persons1.json", "w") as f:
+        json.dump(data, f, indent=2)
+
+
+for i in range(5):
+    write_json(gen_person()[0], gen_person()[1])
+
