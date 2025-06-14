@@ -1,0 +1,21 @@
+/*SELECT MAX(Count) AS [Максимальное количество 1-ой закупки товара]
+FROM ClientGoods*/
+
+--SELECT MIN (Count*CostUnit) AS "Минимальный заказ клиента"
+--FROM ClientGoods
+
+/*SELECT SUM(Count*CostUnit) AS "Сумма поданного товара"
+FROM SallerGoods*/
+
+/*SELECT COUNT(Goods)
+FROM SallerGoods
+WHERE Goods LIKE '%Вафли%'*/
+
+/*SELECT sg.Goods AS "Средняя стоимость оастительного масла за ед.", AVG(cg.CostUnit)
+FROM ClientGoods cg, SallerGoods sg
+WHERE sg.ID=cg.ID AND sg.Goods LIKE "%масло%" AND sg.Goods NOT LIKE "%сливочное%" */
+
+
+SELECT SUM(Count)
+FROM SallerGoods
+WHERE Goods LIKE '%Яблоки%'
