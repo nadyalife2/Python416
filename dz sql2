@@ -1,0 +1,28 @@
+/*SELECT onum
+FROM Orders
+WHERE cnum IN
+    (SELECT cnum
+    FROM Customers
+    WHERE cname="Liu")*/
+    
+/*SELECT MAX(com), sname
+FROM Salespeople
+WHERE snum IN
+    (SELECT snum
+    FROM Customers
+    WHERE city="Rome")*/
+    
+/*SELECT cname
+FROM Customers
+WHERE snum IN
+    (SELECT snum
+    FROM Salespeople
+    WHERE sname="Motika")*/
+    
+
+SELECT snum, MAX(rating),cname
+FROM Customers
+WHERE snum IN
+    (SELECT snum
+    FROM Salespeople
+    WHERE com>0.11)
