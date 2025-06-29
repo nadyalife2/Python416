@@ -14,9 +14,9 @@ body {
 
 .menu li {
     padding: 0px 50px; /* отступы внутри каждого пункта меню */
-    font-size: 18px;
+    font-size: 20px;
     font-family: 'Roboto';
-    color: #f4f0e5;
+    color: #000000;
 }
 
 
