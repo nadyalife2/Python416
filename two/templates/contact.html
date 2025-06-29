@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+
+{% block content %}
+
+<h1>Обратная связь</h1>
+
+<form action="/contact" method="post"><p>Имя: <input type="text" name="username" required></p>
+    <p>Email: <input type="email" name="email" required></p>
+    <p>Сообщение:</p>
+    <p><textarea name="message" cols="40" rows="7"></textarea></p>
+    <p><input type="submit" value="Отправить"></p>
+<!--    <p>-->
+<!--        <button>Отправить</button>-->
+<!--    </p>-->
+</form>
+
+
+{%  endblock %}
