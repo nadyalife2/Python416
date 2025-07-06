@@ -1,0 +1,40 @@
+body {
+    background: rgba(244, 244, 115, 0.875);
+    margin: 0;
+    padding: 0;
+    font-family: Verdana, Geneva, Tahoma, sans-serif;
+}
+.menu{
+    display: flex;
+    justify-content: space-around;
+    list-style: none;
+    background: orange;
+    padding: 20px;
+    margin-top: 0;
+}
+
+.menu a{
+    font-weight: bold;
+    color: brown;
+}
+
+
+.content{
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+.flash {
+    padding: 10px;
+}
+.success {
+    border: 1px solid #21DB56;
+    background: #AEFFC5;
+}
+.error {
+    border: 1px solid #FF4343;
+    background: #FF9C9C;
+}
+ 
