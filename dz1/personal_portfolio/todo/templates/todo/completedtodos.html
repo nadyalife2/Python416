@@ -1,0 +1,25 @@
+{% extends 'todo/base.html' %}
+{% block content %}
+
+<h1>Выполнено:</h1>
+
+<ul>
+    {% for todo in todos %}
+    <li>
+
+            {% if todo.important %}
+            <b>{{ todo.title }}</b>
+            {% else %}
+            {{ todo.title }}
+            {% endif %}
+
+            {% if todo.memo %}
+            - {{ todo.memo }}
+            {% endif %}
+        {{ todo.date_completed }}
+
+    </li>
+    {% endfor %}
+</ul>
+
+{% endblock %}
