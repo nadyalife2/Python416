@@ -75,7 +75,7 @@ std::vector<String> rssFeeds;
 enum MicRoute { MIC_ROUTE_MIC1, MIC_ROUTE_MIC2 };
 enum MicSlot  { MIC_SLOT_LEFT,  MIC_SLOT_RIGHT };
 static MicRoute g_mic_route = MIC_ROUTE_MIC1;
-static MicSlot  g_mic_slot  = MIC_SLOT_LEFT;
+static MicSlot  g_mic_slot  = MIC_SLOT_RIGHT;
 
 enum EmotionState { NEUTRAL, THINKING, HAPPY, NEWS, ERROR_STATE, LISTENING, SPEAKING, EMO_WIFI_AP };
 volatile EmotionState currentEmotion = NEUTRAL;
@@ -197,9 +197,11 @@ static bool audio_enter_rx_mode() {
 // ES8311 INITIALIZATION
 // =================================================================
 void initES8311() {
+  Serial.println("[BOOT] Codec: Setting I2C timeout...");
+  Wire.setTimeOut(100); 
   delay(20);
 
-  // Power Up sequence
+  Serial.println("[BOOT] Codec: Power Up sequence...");
   es_write(0x00, 0x1F); delay(20);
   es_write(0x00, 0x80); delay(20);
 
@@ -410,25 +412,28 @@ String recordAndTranscribe() {
     }
     p += samples*2;
     float db = (peak > 0) ? 20.0f * log10f(peak / 32767.0f) : -96.0f;
-    if (db > (voiced ? -34.0f : -28.0f)) { lastVoice = millis(); voiced = true; }
-    Serial.printf("[REC] DB: %.1f\r", db); 
-    if (voiced && (millis()-lastVoice > 1000)) break; // Silly delay for stop
-    if (!voiced && (millis()-start > 4000)) break; // Wait longer for start
+    if (db > (voiced ? -38.0f : -32.0f)) { lastVoice = millis(); voiced = true; }
+    // Serial.printf("[REC] DB: %.1f\r", db); 
+    if (voiced && (millis()-lastVoice > 1000)) break; 
+    if (!voiced && (millis()-start > 4000)) break; 
   }
-
+ 
   int pcm_len = p - 44;
   audio_release_i2s();
   delay(50);
-
+ 
   audio_enter_tx_mode();
   delay(50);
-
+ 
   if (pcm_len < 3200) { free(wav); return ""; }
   writeWavHeader(wav, pcm_len);
-
+ 
   String transcription = "";
   WiFiClientSecure client; client.setInsecure();
+  client.setHandshakeTimeout(15000); // 15s Handshake
   HTTPClient http; http.begin(client, HF_STT_URL);
+  http.setConnectTimeout(15000); // 15s Connection timeout
+  http.setTimeout(30000); // 30s overall timeout
   http.addHeader("Authorization", "Bearer " + hfApiKey);
   http.addHeader("Content-Type", "audio/wav");
   http.setTimeout(30000);
@@ -445,7 +450,9 @@ String recordAndTranscribe() {
 // =================================================================
 String askRick(const String& userText) {
   WiFiClientSecure client; client.setInsecure();
+  client.setHandshakeTimeout(15000); 
   HTTPClient http; http.begin(client, OR_URL);
+  http.setConnectTimeout(15000); 
   http.addHeader("Authorization","Bearer "+orApiKey);
   http.addHeader("Content-Type","application/json");
   JsonDocument doc; doc["model"]=OR_MODEL;
@@ -490,32 +497,39 @@ void setupWiFi() {
 // =================================================================
 void setup() {
   Serial.begin(115200);
-  delay(500);
-  Serial.println("\n--- MELVIN v3.9.0 ---");
+  delay(1000); 
+  Serial.println("\n\n[BOOT] --- MELVIN v3.9.5 DIAGNOSTIC ---");
 
   lcdMutex = xSemaphoreCreateMutex();
+  Serial.println("[BOOT] LCD Init...");
   lcd.init(); lcd.fillScreen(TFT_BLACK);
   
   pinMode(BOOT_BTN, INPUT_PULLUP);
   pinMode(PA_ENABLE, OUTPUT);
   digitalWrite(PA_ENABLE, LOW);
 
+  Serial.println("[BOOT] SD Card Init...");
   SD_MMC.setPins(SDMMC_CLK_PIN, SDMMC_CMD_PIN, SDMMC_D0_PIN);
-  if (SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT)) { sdReady = true; readSDConfig(); }
+  if (SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT)) { 
+    sdReady = true; 
+    readSDConfig(); 
+    Serial.println("[BOOT] SD Config Loaded.");
+  } else {
+    Serial.println("[BOOT] SD Failed!");
+  }
 
-  // 4. Correct Init Order
+  Serial.println("[BOOT] I2C Init...");
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
   delay(50);
+  
   initES8311();
+  Serial.println("[SYSTEM] Ready.");
+  
   delay(100);
   audio_enter_tx_mode();
-
-  // Run Mic Diagnostic Matrix
-  mic_self_test();
-
-  // Return to stable TX mode
-  audio_enter_tx_mode();
+  
+  speakText("Rick is back.");
 
   xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
   setupWiFi();
