@@ -54,7 +54,7 @@ String orApiKey = "";
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "google/gemma-2-9b-it:free";
+const String OR_MODEL   = "google/gemma-3-12b-it:free";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -171,7 +171,7 @@ static bool audio_enter_rx_mode() {
     audio_release_i2s();
     Serial.println("[AUDIO] RX MODE Start");
 
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
     if (i2s_new_channel(&chan_cfg, NULL, &rx_handle) != ESP_OK) return false;
 
