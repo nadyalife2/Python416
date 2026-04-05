@@ -51,7 +51,7 @@
 String hfApiKey = ""; 
 String orApiKey = "";
 
-const String HF_STT_URL = "https://api-inference.huggingface.co/models/openai/whisper-large-v3-turbo";
+const String HF_STT_URL = "https://api-inference.huggingface.co/models/openai/whisper-large-v3";
 const String HF_TTS_URL = "https://api-inference.huggingface.co/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
 const String OR_MODEL   = "meta-llama/llama-3.1-8b-instruct:free";
@@ -362,6 +362,7 @@ void speakText(const String& text) {
     HTTPClient http; http.begin(client, HF_TTS_URL);
     http.addHeader("Authorization", "Bearer " + hfApiKey);
     http.addHeader("Content-Type", "application/json");
+    http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
     http.setTimeout(25000);
     String escaped = text; escaped.replace("\"", "\\\"");
     int code = http.POST("{\"inputs\":\"" + escaped + "\"}");
@@ -448,6 +449,7 @@ String recordAndTranscribe() {
   http.setTimeout(30000); // 30s overall timeout
   http.addHeader("Authorization", "Bearer " + hfApiKey);
   http.addHeader("Content-Type", "audio/wav");
+  http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
   int code = http.POST(wav, pcm_len + 44);
   Serial.printf("[STT] Code: %d\n", code);
   if (code == 200) {
@@ -470,6 +472,7 @@ String askRick(const String& userText) {
   http.setConnectTimeout(15000); 
   http.addHeader("Authorization","Bearer "+orApiKey);
   http.addHeader("Content-Type","application/json");
+  http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
   JsonDocument doc; doc["model"]=OR_MODEL;
   JsonArray msgs=doc["messages"].to<JsonArray>();
   JsonObject s=msgs.add<JsonObject>(); s["role"]="system"; s["content"]=SYSTEM_PROMPT;
