@@ -1,0 +1,51 @@
+﻿Processing spotpear_melvin (platform: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.37/platform-espressif32.zip; board: esp32-s3-devkitc-1; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/espressif32/esp32-s3-devkitc-1.html
+PLATFORM: Espressif 32 (55.3.37) > Espressif ESP32-S3-DevKitC-1-N8 (8 MB QD, No PSRAM)
+HARDWARE: ESP32S3 240MHz, 320KB RAM, 8MB Flash
+DEBUG: Current (esp-builtin) On-board (esp-builtin) External (cmsis-dap, esp-bridge, esp-prog, iot-bus-jtag, jlink, minimodule, olimex-arm-usb-ocd, olimex-arm-usb-ocd-h, olimex-arm-usb-tiny-h, olimex-jtag-tiny, tumpa)
+PACKAGES: 
+ - contrib-piohome @ 3.4.4 
+ - framework-arduinoespressif32 @ 3.3.7 
+ - framework-arduinoespressif32-libs @ 5.5.0+sha.87912cd291 
+ - tool-esp-rom-elfs @ 2024.10.11 
+ - tool-esptoolpy @ 5.1.2 
+ - tool-openocd-esp32 @ 2.1200.20251215 (12.0) 
+ - tool-xtensa-esp-elf-gdb @ 16.3.0+20250913 
+ - toolchain-xtensa-esp-elf @ 14.2.0+20251107
+*** Applied include path shortening for 336 framework paths ***
+*** Path length reduced from 39693 to ~13914 characters ***
+*** Estimated savings: 25200 characters ***
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 48 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- LovyanGFX @ 1.2.19
+|-- ArduinoJson @ 7.4.3
+|-- ESP32-audioI2S @ 3.4.5+sha.8ac2166
+|-- ESPAsyncWebServer @ 3.10.3
+|-- AsyncTCP @ 3.4.10
+|-- FS @ 3.3.7
+|-- HTTPClient @ 3.3.7
+|-- SD_MMC @ 3.3.7
+|-- WiFi @ 3.3.7
+|-- NetworkClientSecure @ 3.3.7
+|-- Wire @ 3.3.7
+Building in release mode
+Retrieving maximum program size .pio\build\spotpear_melvin\firmware.elf
+Checking size .pio\build\spotpear_melvin\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [==        ]  18.2% (used 59512 bytes from 327680 bytes)
+Flash: [===       ]  32.1% (used 2101287 bytes from 6553600 bytes)
+pio : *** [.pio\build\spotpear_melvin\firmware.bin] D:\xiaoshi\Python416-master (1)\Python416-master\xiaozhi_melvin bac
+k\xiaozhi_melvin\.pio\build\spotpear_melvin\firmware.bin: Процесс не может получить доступ к файлу, так как этот файл з
+анят другим процессом
+At line:1 char:32
++ $env:PYTHONIOENCODING="utf-8"; pio run 2>&1 | Out-File -FilePath "bui ...
++                                ~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (*** [.pio\build...ругим процессом:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+========================= [FAILED] Took 16.70 seconds =========================

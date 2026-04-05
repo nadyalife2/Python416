@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+websockets
+python-dotenv
+openai
+edge-tts
+pydantic
+aiohttp
+python-multipart

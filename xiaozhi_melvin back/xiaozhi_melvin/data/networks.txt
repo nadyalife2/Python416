@@ -1,0 +1,4 @@
+; Формат: SSID:ПАРОЛЬ (одна сеть на строку)
+; Пример:
+; HomeWifi:mypassword123
+; OfficeNet:office2024
