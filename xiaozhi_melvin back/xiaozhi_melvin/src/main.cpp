@@ -54,7 +54,7 @@ String orApiKey = "";
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "meta-llama/llama-3.3-70b-instruct:free";
+const String OR_MODEL   = "google/gemma-2-9b-it:free";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -161,7 +161,7 @@ static void audio_enter_tx_mode() {
     audio = new Audio();
     // Correcting to 4-argument signature per library version (BCLK, LRC, DOUT, MCLK)
     audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
-    audio->setVolume(21); 
+    audio->setVolume(12); // LOWERED FROM 21: Prevents PA amplifier drawing too much current causing 'squishing' on 3.3V rail.
     
     digitalWrite(PA_ENABLE, HIGH);
     delay(50);
@@ -384,7 +384,22 @@ void speakText(const String& text) {
   if (!played) {
     audio_enter_tx_mode();
     delay(100);  // STABILIZATION
-    audio->connecttospeech(text.c_str(), "ru");
+    
+    // Manual URL encoding to bypass connecttospeech() SSL memory crashes
+    String enc = "";
+    for (int i=0; i<text.length(); i++) {
+        char c = text.charAt(i);
+        if (isalnum(c)) enc += c;
+        else if (c == ' ') enc += "+";
+        else {
+            char buf[4];
+            sprintf(buf, "%%%02X", (unsigned char)c);
+            enc += buf;
+        }
+    }
+    String gtts = "http://translate.google.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q=" + enc;
+    
+    audio->connecttohost(gtts.c_str());
     Serial.printf("[TTS] isRunning=%d\n", audio->isRunning());
     unsigned long t = millis();
     while(audio->isRunning() && millis()-t < 15000) {
@@ -473,6 +488,8 @@ String askRick(const String& userText) {
   http.addHeader("Authorization","Bearer "+orApiKey);
   http.addHeader("Content-Type","application/json");
   http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+  http.addHeader("HTTP-Referer", "https://github.com/nadyalife2");
+  http.addHeader("X-Title", "MelvinBot");
   JsonDocument doc; doc["model"]=OR_MODEL;
   JsonArray msgs=doc["messages"].to<JsonArray>();
   JsonObject s=msgs.add<JsonObject>(); s["role"]="system"; s["content"]=SYSTEM_PROMPT;
@@ -484,6 +501,8 @@ String askRick(const String& userText) {
   if(code==200){
       JsonDocument r; deserializeJson(r, http.getString());
       res=r["choices"][0]["message"]["content"].as<String>();
+  } else {
+      res="Ошибка мозга Рика. Код " + String(code);
   }
   http.end();
   return res;
