@@ -51,8 +51,8 @@
 String hfApiKey = ""; 
 String orApiKey = "";
 
-const String HF_STT_URL = "https://router.huggingface.co/models/openai/whisper-large-v3-turbo";
-const String HF_TTS_URL = "https://router.huggingface.co/models/facebook/mms-tts-rus";
+const String HF_STT_URL = "https://api-inference.huggingface.co/models/openai/whisper-large-v3-turbo";
+const String HF_TTS_URL = "https://api-inference.huggingface.co/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
 const String OR_MODEL   = "meta-llama/llama-3.1-8b-instruct:free";
 
@@ -158,12 +158,13 @@ static void audio_enter_tx_mode() {
     audio_release_i2s();
     Serial.println("[AUDIO] TX MODE Start");
     
-    digitalWrite(PA_ENABLE, HIGH);
-    delay(60); 
-
-    if (!audio) audio = new Audio();
+    audio = new Audio();
+    // Correcting to 4-argument signature per library version (BCLK, LRC, DOUT, MCLK)
     audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
-    audio->setVolume(15);
+    audio->setVolume(21); 
+    
+    digitalWrite(PA_ENABLE, HIGH);
+    delay(50);
 }
 
 static bool audio_enter_rx_mode() {
@@ -349,6 +350,7 @@ bool readSDConfig() {
 // =================================================================
 
 void speakText(const String& text) {
+  Serial.printf("[TTS] Speaking: %s\n", text.c_str());
   if (!wifiConnected) { printTextBounded(text, TFT_CYAN); return; }
   currentEmotion = SPEAKING;
   printTextBounded(text, TFT_CYAN);
@@ -356,12 +358,14 @@ void speakText(const String& text) {
   bool played = false;
   if (sdReady && hfApiKey.length() > 5) {
     WiFiClientSecure client; client.setInsecure();
+    client.setHandshakeTimeout(15000);
     HTTPClient http; http.begin(client, HF_TTS_URL);
     http.addHeader("Authorization", "Bearer " + hfApiKey);
     http.addHeader("Content-Type", "application/json");
     http.setTimeout(25000);
     String escaped = text; escaped.replace("\"", "\\\"");
     int code = http.POST("{\"inputs\":\"" + escaped + "\"}");
+    Serial.printf("[TTS] HF Code: %d\n", code);
     if (code == 200) {
       File f = SD_MMC.open("/tts_out.wav", FILE_WRITE);
       if (f) {
@@ -378,9 +382,17 @@ void speakText(const String& text) {
 
   if (!played) {
     audio_enter_tx_mode();
+    delay(100);  // STABILIZATION
     audio->connecttospeech(text.c_str(), "ru");
-    while(audio->isRunning()) { audio->loop(); delay(1); }
+    Serial.printf("[TTS] isRunning=%d\n", audio->isRunning());
+    unsigned long t = millis();
+    while(audio->isRunning() && millis()-t < 15000) {
+        audio->loop();
+        delay(1);
+    }
     audio->stopSong();
+    delay(50);
+    played = true;
   }
 
   currentEmotion = NEUTRAL;
@@ -436,10 +448,13 @@ String recordAndTranscribe() {
   http.setTimeout(30000); // 30s overall timeout
   http.addHeader("Authorization", "Bearer " + hfApiKey);
   http.addHeader("Content-Type", "audio/wav");
-  http.setTimeout(30000);
-  if (http.POST(wav, pcm_len + 44) == 200) {
+  int code = http.POST(wav, pcm_len + 44);
+  Serial.printf("[STT] Code: %d\n", code);
+  if (code == 200) {
       JsonDocument doc; deserializeJson(doc, http.getString());
       transcription = doc["text"].as<String>();
+  } else {
+      Serial.println(http.getString());
   }
   http.end(); free(wav);
   return transcription;
@@ -461,6 +476,7 @@ String askRick(const String& userText) {
   JsonObject u=msgs.add<JsonObject>(); u["role"]="user"; u["content"]=userText;
   String body; serializeJson(doc,body);
   int code=http.POST(body);
+  Serial.printf("[LLM] Code: %d\n", code);
   String res="";
   if(code==200){
       JsonDocument r; deserializeJson(r, http.getString());
@@ -485,7 +501,11 @@ void setupWiFi() {
         if(sep > 0) {
             WiFi.begin(line.substring(0, sep).c_str(), line.substring(sep+1).c_str());
             int tries=0; while(WiFi.status()!=WL_CONNECTED && tries++<20) delay(500);
-            if(WiFi.status()==WL_CONNECTED) { wifiConnected=true; Serial.println(WiFi.localIP()); }
+            if(WiFi.status()==WL_CONNECTED) { 
+        wifiConnected=true; 
+        Serial.println(WiFi.localIP()); 
+        configTime(3 * 3600, 0, "pool.ntp.org"); // Sync time for SSL (UTC+3)
+    }
         }
         f.close();
     }
@@ -523,19 +543,11 @@ void setup() {
   Wire.setClock(100000);
   delay(50);
   
-  initES8311();
+  setupWiFi();
   Serial.println("[SYSTEM] Ready.");
-  
-  delay(100);
-  audio_enter_tx_mode();
-  
-  speakText("Rick is back.");
+  speakText("Рик снова в деле.");
 
   xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
-  setupWiFi();
-  
-  Serial.println("[SYSTEM] Ready.");
-  speakText("Rick is back.");
 }
 
 void loop() {
