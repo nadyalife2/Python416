@@ -54,7 +54,7 @@ String orApiKey = "";
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "google/gemma-3-12b-it:free";
+const String OR_MODEL   = "google/gemini-2.0-flash-lite-preview-02-05:free";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -382,24 +382,26 @@ void speakText(const String& text) {
   }
 
   if (!played) {
-    audio_enter_tx_mode();
-    delay(100);  // STABILIZATION
-    
-    // Manual URL encoding to bypass connecttospeech() SSL memory crashes
     String enc = "";
     for (int i=0; i<text.length(); i++) {
         char c = text.charAt(i);
         if (isalnum(c)) enc += c;
         else if (c == ' ') enc += "+";
-        else {
-            char buf[4];
-            sprintf(buf, "%%%02X", (unsigned char)c);
-            enc += buf;
-        }
+        else { char buf[4]; sprintf(buf, "%%%02X", (unsigned char)c); enc += buf; }
     }
-    String gtts = "http://translate.google.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q=" + enc;
+    String gtts = "https://translate.google.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q=" + enc;
     
-    audio->connecttohost(gtts.c_str());
+    WiFiClientSecure c; c.setInsecure();
+    HTTPClient ht; ht.begin(c, gtts);
+    ht.addHeader("User-Agent", "Mozilla/5.0");
+    if(ht.GET() == 200) {
+        File f = SD_MMC.open("/tts.mp3", FILE_WRITE);
+        if(f) { ht.writeToStream(&f); f.close(); }
+    }
+    ht.end();
+
+    audio_enter_tx_mode();
+    audio->connecttoFS(SD_MMC, "/tts.mp3");
     Serial.printf("[TTS] isRunning=%d\n", audio->isRunning());
     unsigned long t = millis();
     while(audio->isRunning() && millis()-t < 15000) {
@@ -565,6 +567,10 @@ void setup() {
   Wire.setClock(100000);
   delay(50);
   
+  // CRITICAL: Power up the ES8311 so I2S clocks don't deadlock!
+  initES8311();
+  delay(50);
+
   setupWiFi();
   Serial.println("[SYSTEM] Ready.");
   speakText("Рик снова в деле.");
