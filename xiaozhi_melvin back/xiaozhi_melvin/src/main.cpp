@@ -223,12 +223,12 @@ void initES8311() {
   es_write(0x13, 0x10);
 
   // Mic Route (MIC1 or MIC2)
-  uint8_t mic_reg = (g_mic_route == MIC_ROUTE_MIC1) ? 0x1F : 0x3F;
+  uint8_t mic_reg = (g_mic_route == MIC_ROUTE_MIC1) ? 0x1F : 0x7F;
   es_write(0x14, mic_reg);
 
   es_write(0x15, 0x40);
   es_write(0x16, 0x24);
-  es_write(0x17, 0xBF); // ADC digital vol 0 dB
+  es_write(0x17, 0xD0); // ADC digital vol boost (~+10dB)
   es_write(0x18, 0x00); // ALC off
   es_write(0x19, 0x00);
   es_write(0x1A, 0x00);
@@ -410,9 +410,10 @@ String recordAndTranscribe() {
     }
     p += samples*2;
     float db = (peak > 0) ? 20.0f * log10f(peak / 32767.0f) : -96.0f;
-    if (db > (voiced ? -37.0f : -30.0f)) { lastVoice = millis(); voiced = true; }
-    if (voiced && (millis()-lastVoice > 800)) break;
-    if (!voiced && (millis()-start > 3000)) break;
+    if (db > (voiced ? -34.0f : -28.0f)) { lastVoice = millis(); voiced = true; }
+    Serial.printf("[REC] DB: %.1f\r", db); 
+    if (voiced && (millis()-lastVoice > 1000)) break; // Silly delay for stop
+    if (!voiced && (millis()-start > 4000)) break; // Wait longer for start
   }
 
   int pcm_len = p - 44;
