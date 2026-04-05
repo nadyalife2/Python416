@@ -54,7 +54,7 @@ String orApiKey = "";
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "meta-llama/llama-3.1-8b-instruct:free";
+const String OR_MODEL   = "meta-llama/llama-3.3-70b-instruct:free";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -368,11 +368,11 @@ void speakText(const String& text) {
     int code = http.POST("{\"inputs\":\"" + escaped + "\"}");
     Serial.printf("[TTS] HF Code: %d\n", code);
     if (code == 200) {
-      File f = SD_MMC.open("/tts_out.wav", FILE_WRITE);
+      File f = SD_MMC.open("/tts_out.flac", FILE_WRITE);
       if (f) {
         http.writeToStream(&f); f.close();
         audio_enter_tx_mode();
-        audio->connecttoFS(SD_MMC, "/tts_out.wav");
+        audio->connecttoFS(SD_MMC, "/tts_out.flac");
         while(audio->isRunning()) { audio->loop(); delay(1); }
         audio->stopSong();
         played = true;
