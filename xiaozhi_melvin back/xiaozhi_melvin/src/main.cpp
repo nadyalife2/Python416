@@ -178,10 +178,10 @@ static bool audio_enter_rx_mode() {
     clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
 
     i2s_std_slot_config_t slot = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
-    slot.slot_mask = I2S_STD_SLOT_LEFT; 
+    slot.slot_mask = I2S_STD_SLOT_BOTH; 
 
     i2s_std_gpio_config_t pins = {
-      .mclk = I2S_MCLK_PIN, .bclk = I2S_BCLK_PIN, .ws = I2S_WS_PIN, .dout = I2S_DOUT_PIN, .din = I2S_DIN_PIN
+      .mclk = I2S_MCLK_PIN, .bclk = I2S_BCLK_PIN, .ws = I2S_WS_PIN, .dout = I2S_GPIO_UNUSED, .din = I2S_DIN_PIN
     };
 
     i2s_std_config_t cfg = { .clk_cfg = clk, .slot_cfg = slot, .gpio_cfg = pins };
@@ -197,8 +197,6 @@ static bool audio_enter_rx_mode() {
 // ES8311 INITIALIZATION
 // =================================================================
 void initES8311() {
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);
   delay(20);
 
   // Power Up sequence
@@ -352,7 +350,6 @@ void speakText(const String& text) {
   if (!wifiConnected) { printTextBounded(text, TFT_CYAN); return; }
   currentEmotion = SPEAKING;
   printTextBounded(text, TFT_CYAN);
-  if (animationTaskHandle) vTaskSuspend(animationTaskHandle);
 
   bool played = false;
   if (sdReady && hfApiKey.length() > 5) {
@@ -367,7 +364,6 @@ void speakText(const String& text) {
       File f = SD_MMC.open("/tts_out.wav", FILE_WRITE);
       if (f) {
         http.writeToStream(&f); f.close();
-        http.end();
         audio_enter_tx_mode();
         audio->connecttoFS(SD_MMC, "/tts_out.wav");
         while(audio->isRunning()) { audio->loop(); delay(1); }
@@ -385,7 +381,6 @@ void speakText(const String& text) {
     audio->stopSong();
   }
 
-  if (animationTaskHandle) vTaskResume(animationTaskHandle);
   currentEmotion = NEUTRAL;
 }
 
@@ -448,7 +443,6 @@ String recordAndTranscribe() {
 // LLM & RICK LOGIC
 // =================================================================
 String askRick(const String& userText) {
-  if (animationTaskHandle) vTaskSuspend(animationTaskHandle);
   WiFiClientSecure client; client.setInsecure();
   HTTPClient http; http.begin(client, OR_URL);
   http.addHeader("Authorization","Bearer "+orApiKey);
@@ -464,7 +458,7 @@ String askRick(const String& userText) {
       JsonDocument r; deserializeJson(r, http.getString());
       res=r["choices"][0]["message"]["content"].as<String>();
   }
-  http.end(); if (animationTaskHandle) vTaskResume(animationTaskHandle);
+  http.end();
   return res;
 }
 
@@ -508,9 +502,13 @@ void setup() {
   SD_MMC.setPins(SDMMC_CLK_PIN, SDMMC_CMD_PIN, SDMMC_D0_PIN);
   if (SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT)) { sdReady = true; readSDConfig(); }
 
-  // Start MCLK before Codec Init
-  audio_enter_tx_mode();
+  // 4. Correct Init Order
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(100000);
+  delay(50);
   initES8311();
+  delay(100);
+  audio_enter_tx_mode();
 
   // Run Mic Diagnostic Matrix
   mic_self_test();
