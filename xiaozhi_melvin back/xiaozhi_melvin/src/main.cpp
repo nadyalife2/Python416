@@ -394,6 +394,7 @@ void speakText(const String& text) {
     Serial.println("[TTS] Downloading Google Audio...");
     WiFiClientSecure c; c.setInsecure(); HTTPClient ht; 
     ht.begin(c, gtts);
+    ht.setTimeout(5000);
     ht.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     
     int code = ht.GET();
