@@ -141,6 +141,8 @@ static void audio_release_i2s() {
     Serial.println("[AUDIO] Stopping TX/RX...");
     if (audio) {
         audio->stopSong();
+        delete audio;
+        audio = nullptr;
     }
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
@@ -159,6 +161,12 @@ static void audio_enter_tx_mode() {
         rx_handle = NULL;
     }
     Serial.println("[AUDIO] TX MODE Start");
+    
+    // Explicitly recreate the audio object to FORCE the ESP-IDF driver to claim the GPIO Matrix from rx_handle
+    audio = new Audio();
+    audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
+    audio->setVolume(12);
+
     digitalWrite(PA_ENABLE, HIGH);
     delay(50);
 }
@@ -562,10 +570,6 @@ void setup() {
   // CRITICAL: Power up the ES8311 so I2S clocks don't deadlock!
   initES8311();
   delay(50);
-  
-  audio = new Audio();
-  audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
-  audio->setVolume(12);
 
   setupWiFi();
   Serial.println("[SYSTEM] Ready.");
