@@ -487,6 +487,7 @@ String recordAndTranscribe() {
       transcription = doc["text"].as<String>();
   } else {
       Serial.println(http.getString());
+      transcription = "[API_ERROR]";
   }
   http.end(); free(wav);
   return transcription;
