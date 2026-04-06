@@ -54,7 +54,7 @@ String orApiKey = "";
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "google/gemini-2.0-pro-exp-02-05:free";
+const String OR_MODEL   = "google/gemini-2.0-flash-exp:free";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -387,34 +387,13 @@ void speakText(const String& text) {
     }
     String gtts = "https://translate.googleapis.com/translate_tts?ie=UTF-8&tl=ru&client=gtx&q=" + enc;
     
-    Serial.println("[TTS] Downloading Google Audio...");
-    WiFiClientSecure c; c.setInsecure(); HTTPClient ht; 
-    ht.begin(c, gtts);
-    ht.setTimeout(5000);
-    ht.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    Serial.println("[TTS] Streaming Google Audio directly to I2S...");
     
-    int code = ht.GET();
-    Serial.printf("[TTS] Google HTTP Code: %d\n", code);
-    if(code == 200) {
-        SD_MMC.remove("/tts.mp3");
-        File f = SD_MMC.open("/tts.mp3", FILE_WRITE);
-        if(f) { 
-            ht.writeToStream(&f); f.close(); 
-            Serial.printf("[TTS] Saved size: %d\n", SD_MMC.open("/tts.mp3", FILE_READ).size());
-            File r = SD_MMC.open("/tts.mp3", FILE_READ);
-            Serial.print("[TTS] Header: ");
-            for(int k=0; k<10; k++) { Serial.printf("%02X ", r.read()); }
-            Serial.println(); r.close();
-        }
-    } else {
-        Serial.printf("[TTS] Error body: %s\n", ht.getString().c_str());
-    }
-    ht.end();
-
     audio_enter_tx_mode();
     delay(100); 
     
-    audio->connecttoFS(SD_MMC, "/tts.mp3");
+    audio->setConnectionTimeout(2000, true);
+    audio->connecttohost(gtts.c_str());
     Serial.printf("[TTS] isRunning=%d\n", audio->isRunning());
     unsigned long t = millis();
     while(audio->isRunning() && millis()-t < 15000) {
