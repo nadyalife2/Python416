@@ -1,0 +1,24 @@
+# MELVIN AI PROJECT STATUS SUMMARY (v3.9.1)
+Date: April 2026
+
+## 1. COMPLETED WORK (Implemented but needs verification)
+- **Audio Lifecycle manager**: Implemented `audio_release_i2s()`, `audio_enter_rx_mode()`, and `audio_enter_tx_mode()`. This resolves the "no available channel found" error when switching from record to speak.
+- **ES8311 Init**: Simplified and strict register mapping (0x00 - 0x45). Added MCLK-first initialization logic.
+- **LCD Pin Fix**: Corrected the SPI/LCD pins to GPIOs 4, 2, 47, 5, 38, 42. Previous pins (33-37) were conflicting with Octal PSRAM (OPI).
+- **Diagnostic Matrix**: Added `mic_self_test()` to cycle through configurations (MIC1/MIC2 x LEFT/RIGHT slot) to identify the real voice path.
+
+## 2. PENDING ISSUES ("Молчит и не записывает")
+- **Silence (Speaker)**: If sound is still missing, we need to verify:
+    - `PA_ENABLE` (GPIO 46) voltage levels.
+    - ES8311 `0x0A` Register (Mute status).
+- **Recording (Microphone)**: If transcription is empty:
+    - Identify the winning combination from `mic_self_test` Peak dBFS logs.
+    - Finalize `g_mic_route` and `g_mic_slot` in the code.
+
+## 3. PLANNED ACTIONS (Strategy)
+- **Serial Monitoring**: Wait for the diagnostic matrix to finish (~10 sec after boot) and record the dBFS results.
+- **Voice Sensitivity**: Adjust PGA gain (+42dB default) or digital ADC volume (0dB default).
+- **HTTP/STT**: Verify the Hugging Face API key is correctly read from SD cards and used in the new "Lifecycle" flow.
+
+---
+End of Summary
