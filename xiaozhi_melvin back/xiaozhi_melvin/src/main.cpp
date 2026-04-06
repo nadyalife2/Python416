@@ -199,44 +199,44 @@ void initES8311() {
   delay(20);
 
   Serial.println("[BOOT] Codec: Power Up sequence...");
-  es_write(0x00, 0x1F); delay(20);
-  es_write(0x00, 0x80); delay(20);
+  // Сброс — точно как в рабочей прошивке MELVIN
+  es_write(0x01, 0x1F); delay(20);
+  es_write(0x01, 0x00); delay(20);  // <-- было 0x80, теперь 0x00!
 
-  // Static Register Map
-  es_write(0x01, 0x3F);
+  // Тактирование
   es_write(0x02, 0x00);
   es_write(0x03, 0x10);
-  es_write(0x04, 0x10);
-  es_write(0x05, 0x00);
-  es_write(0x06, 0x04);
-  es_write(0x07, 0x00);
-  es_write(0x08, 0x40);
-  es_write(0x09, 0x00);
-  es_write(0x0A, 0x00);
-  es_write(0x0D, 0x01);
-  es_write(0x0E, 0x02);
-  es_write(0x0F, 0x7F);
+  delay(10);
+
+  // AIF: I2S, 16 бит
+  es_write(0x0B, 0x00);
+  es_write(0x0C, 0x00);
+
+  // Power / System — из рабочего кода
   es_write(0x10, 0x00);
-  es_write(0x11, 0x7C);
-  es_write(0x12, 0x00);
-  es_write(0x13, 0x10);
+  es_write(0x11, 0xFC);
+  delay(10);
 
-  // Mic Route (MIC1 or MIC2)
-  uint8_t mic_reg = (g_mic_route == MIC_ROUTE_MIC1) ? 0x1F : 0x7F;
-  es_write(0x14, mic_reg);
+  es_write(0x00, 0x80);  // chip enable
+  delay(10);
 
-  es_write(0x15, 0x40);
-  es_write(0x16, 0x24);
-  es_write(0x17, 0xD0); // ADC digital vol boost (~+10dB)
-  es_write(0x18, 0x00); // ALC off
-  es_write(0x19, 0x00);
-  es_write(0x1A, 0x00);
-  es_write(0x1B, 0x00);
-  es_write(0x1C, 0x6A); // HPF on
-  es_write(0x31, 0x60);
-  es_write(0x32, 0xBF);
-  es_write(0x37, 0x48);
-  es_write(0x45, 0x00);
+  es_write(0x0D, 0x01);  // DAC timing
+  es_write(0x0E, 0x02);  // ADC timing
+  delay(10);
+
+  // MIC PGA +18dB (0x28)
+  es_write(0x12, 0x28);
+  es_write(0x13, 0x06);  // ADC volume (усиление)
+
+  // ADC включить
+  es_write(0x16, 0x11);
+  es_write(0x17, 0x11);
+  delay(10);
+
+  // DAC включить
+  es_write(0x14, 0x1A);
+  es_write(0x15, 0x1A);
+  delay(10);
 
   Serial.println("[CODEC] ES8311 Ready");
 }
