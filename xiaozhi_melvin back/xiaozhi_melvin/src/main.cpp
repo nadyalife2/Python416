@@ -54,7 +54,7 @@ String orApiKey = "";
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "meta-llama/llama-3.1-8b-instruct:free";
+const String OR_MODEL   = "qwen/qwen-2.5-coder-32b-instruct:free";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -389,16 +389,15 @@ void speakText(const String& text) {
         else if (c == ' ') enc += "+";
         else { char buf[4]; sprintf(buf, "%%%02X", (unsigned char)c); enc += buf; }
     }
-    String ttsUrl = "http://api.voicerss.org/?key=e74c83d6a4544f83b631d8e12d4d3d5f&hl=ru-ru&c=MP3&f=16khz_16bit_mono&src=" + enc;
+    String gtts = "https://translate.google.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q=" + enc;
     
-    Serial.println("[TTS] Downloading VoiceRSS Audio...");
-    WiFiClient c; HTTPClient ht; 
-    ht.begin(c, ttsUrl);
-    ht.addHeader("User-Agent", "Mozilla/5.0");
+    Serial.println("[TTS] Downloading Google Audio...");
+    WiFiClientSecure c; c.setInsecure(); HTTPClient ht; 
+    ht.begin(c, gtts);
     ht.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     
     int code = ht.GET();
-    Serial.printf("[TTS] VoiceRSS HTTP Code: %d\n", code);
+    Serial.printf("[TTS] Google HTTP Code: %d\n", code);
     if(code == 200) {
         SD_MMC.remove("/tts.mp3");
         File f = SD_MMC.open("/tts.mp3", FILE_WRITE);
