@@ -54,7 +54,7 @@ String orApiKey = "";
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "qwen/qwen-2.5-coder-32b-instruct:free";
+const String OR_MODEL   = "google/gemini-2.0-pro-exp-02-05:free";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -138,11 +138,9 @@ static uint8_t es_read(uint8_t reg) {
 // =================================================================
 
 static void audio_release_i2s() {
-    Serial.println("[AUDIO] Releasing I2S...");
+    Serial.println("[AUDIO] Stopping TX/RX...");
     if (audio) {
         audio->stopSong();
-        delete audio;
-        audio = nullptr;
     }
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
@@ -155,14 +153,12 @@ static void audio_release_i2s() {
 }
 
 static void audio_enter_tx_mode() {
-    audio_release_i2s();
+    if (rx_handle) {
+        i2s_channel_disable(rx_handle);
+        i2s_del_channel(rx_handle);
+        rx_handle = NULL;
+    }
     Serial.println("[AUDIO] TX MODE Start");
-    
-    audio = new Audio();
-    // Correcting to 4-argument signature per library version (BCLK, LRC, DOUT, MCLK)
-    audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
-    audio->setVolume(12); // LOWERED FROM 21: Prevents PA amplifier drawing too much current causing 'squishing' on 3.3V rail.
-    
     digitalWrite(PA_ENABLE, HIGH);
     delay(50);
 }
@@ -587,6 +583,10 @@ void setup() {
   // CRITICAL: Power up the ES8311 so I2S clocks don't deadlock!
   initES8311();
   delay(50);
+  
+  audio = new Audio();
+  audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
+  audio->setVolume(12);
 
   setupWiFi();
   Serial.println("[SYSTEM] Ready.");
