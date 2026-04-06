@@ -54,7 +54,7 @@ String orApiKey = "";
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "nvidia/llama-3.1-nemotron-70b-instruct:free";
+const String OR_MODEL   = "meta-llama/llama-3.1-8b-instruct:free";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -391,19 +391,40 @@ void speakText(const String& text) {
     }
     String ttsUrl = "http://api.voicerss.org/?key=e74c83d6a4544f83b631d8e12d4d3d5f&hl=ru-ru&c=MP3&f=16khz_16bit_mono&src=" + enc;
     
+    Serial.println("[TTS] Downloading VoiceRSS Audio...");
+    WiFiClient c; HTTPClient ht; 
+    ht.begin(c, ttsUrl);
+    ht.addHeader("User-Agent", "Mozilla/5.0");
+    ht.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    
+    int code = ht.GET();
+    Serial.printf("[TTS] VoiceRSS HTTP Code: %d\n", code);
+    if(code == 200) {
+        SD_MMC.remove("/tts.mp3");
+        File f = SD_MMC.open("/tts.mp3", FILE_WRITE);
+        if(f) { 
+            ht.writeToStream(&f); f.close(); 
+            Serial.printf("[TTS] Saved size: %d\n", SD_MMC.open("/tts.mp3", FILE_READ).size());
+            File r = SD_MMC.open("/tts.mp3", FILE_READ);
+            Serial.print("[TTS] Header: ");
+            for(int k=0; k<10; k++) { Serial.printf("%02X ", r.read()); }
+            Serial.println(); r.close();
+        }
+    } else {
+        Serial.printf("[TTS] Error body: %s\n", ht.getString().c_str());
+    }
+    ht.end();
+
     audio_enter_tx_mode();
     delay(100); 
     
-    audio->connecttohost(ttsUrl.c_str());
+    audio->connecttoFS(SD_MMC, "/tts.mp3");
     Serial.printf("[TTS] isRunning=%d\n", audio->isRunning());
     unsigned long t = millis();
     while(audio->isRunning() && millis()-t < 15000) {
-        audio->loop();
-        delay(1);
+        audio->loop(); delay(1);
     }
-    audio->stopSong();
-    delay(50);
-    played = true;
+    audio->stopSong(); delay(50); played = true;
   }
 
   currentEmotion = NEUTRAL;
