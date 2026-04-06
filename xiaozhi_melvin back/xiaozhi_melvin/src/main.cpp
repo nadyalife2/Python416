@@ -389,7 +389,7 @@ void speakText(const String& text) {
         else if (c == ' ') enc += "+";
         else { char buf[4]; sprintf(buf, "%%%02X", (unsigned char)c); enc += buf; }
     }
-    String gtts = "https://translate.google.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q=" + enc;
+    String gtts = "https://translate.googleapis.com/translate_tts?ie=UTF-8&tl=ru&client=gtx&q=" + enc;
     
     Serial.println("[TTS] Downloading Google Audio...");
     WiFiClientSecure c; c.setInsecure(); HTTPClient ht; 
