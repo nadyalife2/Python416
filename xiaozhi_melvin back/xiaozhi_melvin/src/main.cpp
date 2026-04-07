@@ -54,7 +54,7 @@ String orApiKey = ""; // Пожалуйста, укажите ваш ключ Gr
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://api.groq.com/openai/v1/chat/completions";
-const String OR_MODEL   = "llama-3.3-70b-versatile";
+const String OR_MODEL   = "llama-3.1-8b-instant";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -414,40 +414,45 @@ void speakText(const String& text) {
         else if (c == ' ') enc += "+";
         else { char buf[4]; sprintf(buf, "%%%02X", (unsigned char)c); enc += buf; }
     }
-    String gtts = "https://translate.googleapis.com/translate_tts?ie=UTF-8&tl=ru&client=gtx&q=" + enc;
+    String gtts = "https://translate.googleapis.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q=" + enc;
     
-    Serial.println("[TTS] Streaming Google Audio directly to I2S...");
+    Serial.println("[TTS] Downloading Google TTS to SD...");
     
-    audio_enter_tx_mode();
-    delay(100); 
+    // Скачиваем аудио через HTTPClient (c правильными заголовками!), тогда сохраняем
+    // на SD и воспроизводим через connecttoFS. Это избегает
+    // проблему readSpace<br (блокировка Google в connecttohost без User-Agent).
+    WiFiClientSecure gttsClient; gttsClient.setInsecure();
+    gttsClient.setHandshakeTimeout(15000);
+    HTTPClient gttsHttp; gttsHttp.begin(gttsClient, gtts);
+    gttsHttp.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0");
+    gttsHttp.addHeader("Referer", "https://translate.google.com/");
+    gttsHttp.addHeader("Accept", "audio/mpeg,audio/*");
+    gttsHttp.setTimeout(15000);
+    int gttsCode = gttsHttp.GET();
+    Serial.printf("[TTS] Google Code: %d\n", gttsCode);
     
-    audio->setConnectionTimeout(2000, true);
-    audio->connecttohost(gtts.c_str());
-    Serial.printf("[TTS] isRunning=%d\n", audio->isRunning());
-    
-    unsigned long start = millis(), lastPosTime = millis();
-    uint32_t lastPos = 0;
-    
-    // SOFTWARE I2S WATCHDOG:
-    // Если I2S "тупит" (readSpace < br), цикл loop() замирает, вызывая Guru Meditation.
-    // Мы следим за временем проигрывания. Если оно не меняется 1.5 сек — это Deadlock.
-    while(audio->isRunning() && (millis() - start < 15000)) {
-        audio->loop();
-        
-        uint32_t currentPos = audio->getAudioCurrentTime();
-        if (currentPos != lastPos) { 
-            lastPos = currentPos; 
-            lastPosTime = millis(); 
-        }
-
-        if (millis() - lastPosTime > 1500) { 
-            Serial.println("[AUDIO] Deadlock detected (readSpace < br starvation)!"); 
-            break; 
-        }
-        
-        delay(2); // Даем OS подышать, чтобы не срабатывал WDT таймер
-    }
-    audio->stopSong(); delay(50); played = true;
+    if (gttsCode == 200) {
+      if (sdReady) {
+        File f = SD_MMC.open("/tts_gtts.mp3", FILE_WRITE);
+        if (f) {
+          gttsHttp.writeToStream(&f);
+          f.close();
+          gttsHttp.end();
+          audio_enter_tx_mode();
+          audio->connecttoFS(SD_MMC, "/tts_gtts.mp3");
+          unsigned long start = millis(), lastPosTime = millis();
+          uint32_t lastPos = 0;
+          while(audio->isRunning() && (millis() - start < 15000)) {
+              audio->loop();
+              uint32_t currentPos = audio->getAudioCurrentTime();
+              if (currentPos != lastPos) { lastPos = currentPos; lastPosTime = millis(); }
+              if (millis() - lastPosTime > 2000) { Serial.println("[AUDIO] SD TTS timeout!"); break; }
+              delay(2);
+          }
+          audio->stopSong(); played = true;
+        } else { gttsHttp.end(); }
+      } else { gttsHttp.end(); }
+    } else { gttsHttp.end(); }
   }
 
   currentEmotion = NEUTRAL;
@@ -585,7 +590,7 @@ void setupWiFi() {
 void setup() {
   Serial.begin(115200);
   delay(1000); 
-  Serial.println("\n\n[BOOT] --- MELVIN v4.0.4-Final ---");
+  Serial.println("\n\n[BOOT] --- MELVIN v4.0.5-TTS ---");
 
   lcdMutex = xSemaphoreCreateMutex();
   Serial.println("[BOOT] LCD Init...");
