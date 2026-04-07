@@ -49,12 +49,12 @@
 
 // --- API KEYS (Removed for security, please use config.txt on SD) ---
 String hfApiKey = ""; 
-String orApiKey = "";
+String orApiKey = ""; // Пожалуйста, укажите ваш ключ Groq в файле config.txt на SD-карте
 
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
-const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "mistralai/mistral-7b-instruct:free";
+const String OR_URL     = "https://api.groq.com/openai/v1/chat/completions";
+const String OR_MODEL   = "llama-3.3-70b-versatile";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -572,7 +572,7 @@ void setupWiFi() {
 void setup() {
   Serial.begin(115200);
   delay(1000); 
-  Serial.println("\n\n[BOOT] --- MELVIN v4.0.1-Stable ---");
+  Serial.println("\n\n[BOOT] --- MELVIN v4.0.3-Unified ---");
 
   lcdMutex = xSemaphoreCreateMutex();
   Serial.println("[BOOT] LCD Init...");
@@ -600,6 +600,12 @@ void setup() {
   // CRITICAL: Power up the ES8311 so I2S clocks don't deadlock!
   initES8311();
   delay(50);
+
+  // INITIALIZE AUDIO SINGLETON:
+  // Мы создаем объект один раз здесь, чтобы избежать утечек памяти I2S при пересоздании.
+  audio = new Audio();
+  audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
+  audio->setVolume(12);
 
   setupWiFi();
   Serial.println("[SYSTEM] Ready.");
