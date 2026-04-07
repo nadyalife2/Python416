@@ -347,12 +347,14 @@ void speakText(const String& text) {
   if (sdReady && hfApiKey.length() > 5) {
     WiFiClientSecure client; client.setInsecure();
     client.setHandshakeTimeout(15000);
+    Serial.println("[TTS] Connecting to HF Proxy...");
     HTTPClient http; http.begin(client, HF_TTS_URL());
     http.addHeader("Authorization", "Bearer " + hfApiKey);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
     http.setTimeout(25000);
     String escaped = text; escaped.replace("\"", "\\\"");
+    Serial.println("[TTS] Sending POST to Proxy...");
     int code = http.POST("{\"inputs\":\"" + escaped + "\"}");
     Serial.printf("[TTS] HF Code: %d\n", code);
     if (code == 200) {
@@ -547,11 +549,15 @@ void setupWiFi() {
 void setup() {
   Serial.begin(115200);
   delay(1000); 
-  Serial.println("\n\n[BOOT] --- MELVIN v4.0.2-PROXY ---");
+  Serial.println("\n\n[BOOT] --- MELVIN v4.0.7-BootFix ---");
 
   lcdMutex = xSemaphoreCreateMutex();
   Serial.println("[BOOT] LCD Init...");
   lcd.init(); lcd.fillScreen(TFT_BLACK);
+  
+  // КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Запускаем анимацию СРАЗУ, 
+  // чтобы экран не висел черным во время настройки WiFi и SD.
+  xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
   
   pinMode(BOOT_BTN, INPUT_PULLUP);
   pinMode(PA_ENABLE, OUTPUT);
@@ -581,9 +587,9 @@ void setup() {
 
   setupWiFi();
   Serial.println("[SYSTEM] Ready.");
+  
+  // Приветствие в самом конце, чтобы не блокировать loop() при ошибках сети
   speakText("Рик снова в деле.");
-
-  xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
 }
 
 void loop() {
