@@ -54,7 +54,7 @@ String orApiKey = "";
 const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
 const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
 const String OR_URL     = "https://openrouter.ai/api/v1/chat/completions";
-const String OR_MODEL   = "meta-llama/llama-3.2-1b-instruct:free";
+const String OR_MODEL   = "mistralai/mistral-7b-instruct:free";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -137,12 +137,15 @@ static uint8_t es_read(uint8_t reg) {
 // AUDIO LIFECYCLE MANAGER
 // =================================================================
 
+// Менеджер жизненного цикла аудио.
+// Проблема: ESP32-S3 имеет всего 2 I2S порта. Если постоянно удалять и создавать объект Audio,
+// драйвер ESP-IDF со временем перестает выделять каналы (ошибка no available channel found).
+// Решение: Используем глобальный синглтон Audio и только переключаем режимы.
 static void audio_release_i2s() {
     Serial.println("[AUDIO] Stopping TX/RX...");
     if (audio) {
-        audio->stopSong();
-        delete audio;
-        audio = nullptr;
+        audio->stopSong(); 
+        // НЕ удаляем объект, чтобы не плодить утечки дескрипторов I2S
     }
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
@@ -154,18 +157,19 @@ static void audio_release_i2s() {
     delay(50);
 }
 
+// Режим передачи (Динамик)
 static void audio_enter_tx_mode() {
-    if (rx_handle) {
-        i2s_channel_disable(rx_handle);
-        i2s_del_channel(rx_handle);
-        rx_handle = NULL;
-    }
+    audio_release_i2s();
     Serial.println("[AUDIO] TX MODE Start");
     
-    // Explicitly recreate the audio object to FORCE the ESP-IDF driver to claim the GPIO Matrix from rx_handle
-    audio = new Audio();
-    audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
-    audio->setVolume(12);
+    // ПРИНУДИТЕЛЬНЫЙ ПЕРЕХВАТ ПИНОВ:
+    // Когда микрофон (RX) выключается, он может оставить пины MCLK/BCLK в неопределенном состоянии.
+    // Вызов setPinout заставляет библиотеку Audio заново "застолбить" GPIO Matrix для Speaker.
+    if (audio) {
+        // ВАЖНО: В этой версии библиотеки 4 аргумента: BCLK, LRC, DOUT, MCLK
+        audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
+        audio->setVolume(12);
+    }
 
     digitalWrite(PA_ENABLE, HIGH);
     delay(50);
@@ -403,9 +407,28 @@ void speakText(const String& text) {
     audio->setConnectionTimeout(2000, true);
     audio->connecttohost(gtts.c_str());
     Serial.printf("[TTS] isRunning=%d\n", audio->isRunning());
-    unsigned long t = millis();
-    while(audio->isRunning() && millis()-t < 15000) {
-        audio->loop(); delay(1);
+    
+    unsigned long start = millis(), lastPosTime = millis();
+    uint32_t lastPos = 0;
+    
+    // SOFTWARE I2S WATCHDOG:
+    // Если I2S "тупит" (readSpace < br), цикл loop() замирает, вызывая Guru Meditation.
+    // Мы следим за временем проигрывания. Если оно не меняется 1.5 сек — это Deadlock.
+    while(audio->isRunning() && (millis() - start < 15000)) {
+        audio->loop();
+        
+        uint32_t currentPos = audio->getAudioCurrentTime();
+        if (currentPos != lastPos) { 
+            lastPos = currentPos; 
+            lastPosTime = millis(); 
+        }
+
+        if (millis() - lastPosTime > 1500) { 
+            Serial.println("[AUDIO] Deadlock detected (readSpace < br starvation)!"); 
+            break; 
+        }
+        
+        delay(2); // Даем OS подышать, чтобы не срабатывал WDT таймер
     }
     audio->stopSong(); delay(50); played = true;
   }
