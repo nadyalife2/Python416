@@ -19,7 +19,16 @@
 #include "Audio.h"
 
 // =================================================================
-// MELVIN v4.0.1 - STABLE AUDIO REFACTOR (FIXED SIGNATURE)
+// MELVIN v4.1.0 - PROXY SUPPORT (config.txt line 3 = proxy URL)
+// =================================================================
+// config.txt на SD:
+//   строка 1: HuggingFace API key  (hf_xxxx)
+//   строка 2: Groq API key         (gsk_xxxx)
+//   строка 3: Proxy URL            (https://YOURNAME.pythonanywhere.com)
+//   строка 4+: RSS feeds (опционально)
+//
+// Если строка 3 заполнена — все запросы идут через прокси.
+// Если строка 3 пустая   — прямые запросы к API (нужен VPN).
 // =================================================================
 
 // --- GPIO PINS (STRICT MAPPING) ---
@@ -47,14 +56,17 @@
 #define ES8311_ADDR   0x18
 #define SAMPLE_RATE   16000
 
-// --- API KEYS (Removed for security, please use config.txt on SD) ---
-String hfApiKey = ""; 
-String orApiKey = ""; // Пожалуйста, укажите ваш ключ Groq в файле config.txt на SD-карте
+// --- API KEYS (loaded from SD config.txt) ---
+String hfApiKey = "";
+String orApiKey = "";
+String proxyUrl = "";  // e.g. "https://yourname.pythonanywhere.com"
 
-const String HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
-const String HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
-const String OR_URL     = "https://api.groq.com/openai/v1/chat/completions";
-const String OR_MODEL   = "llama-3.1-8b-instant";
+// --- API URLs (resolved after SD config is loaded) ---
+String HF_STT_URL = "";
+String HF_TTS_URL = "";
+String OR_URL     = "";
+
+const String OR_MODEL = "llama-3.1-8b-instant";
 
 const String SYSTEM_PROMPT =
   "You are Rick Sanchez C-137. Be rude, sarcastic, and use scientific jargon. "
@@ -63,7 +75,7 @@ const String SYSTEM_PROMPT =
 
 // --- GLOBAL OBJECTS ---
 LGFX lcd;
-Audio* audio = nullptr; 
+Audio* audio = nullptr;
 AsyncWebServer server(80);
 
 bool sdReady = false;
@@ -136,22 +148,11 @@ static uint8_t es_read(uint8_t reg) {
 // =================================================================
 // AUDIO LIFECYCLE MANAGER
 // =================================================================
-
-// Менеджер жизненного цикла аудио.
-// Проблема: ESP32-S3 имеет всего 2 I2S порта. Если постоянно удалять и создавать объект Audio,
-// драйвер ESP-IDF со временем перестает выделять каналы (ошибка no available channel found).
-// Решение: Используем глобальный синглтон Audio и только переключаем режимы.
-// Остановка I2S сервисов (RX удаляем, TX только останавливаем)
 static void audio_release_i2s() {
     Serial.println("[AUDIO] Stopping RX/TX...");
-    
-    // Останавливаем воспроизведение, но НЕ удаляем объект Audio,
-    // чтобы не тратить I2S порты и не ждать пересоздания DMA дескрипторов.
     if (audio) {
         audio->stopSong();
     }
-
-    // Микрофон (RX) удаляем полностью, так как он на отдельном порту I2S_NUM_1
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
         i2s_del_channel(rx_handle);
@@ -162,16 +163,9 @@ static void audio_release_i2s() {
     delay(50);
 }
 
-// Режим передачи (Динамик)
 static void audio_enter_tx_mode() {
     audio_release_i2s();
     Serial.println("[AUDIO] TX MODE Start");
-    
-    // ВАЖНО: Мы больше НЕ вызываем setPinout здесь.
-    // Объект Audio создан в setup() и уже привязан к I2S_NUM_0 через setPinout один раз.
-    // Повторный вызов setPinout внутри библиотеки Audio приводит 
-    // к пересозданию канала и утечке (no available channel found).
-
     digitalWrite(PA_ENABLE, HIGH);
     delay(50);
 }
@@ -188,14 +182,14 @@ static bool audio_enter_rx_mode() {
     clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
 
     i2s_std_slot_config_t slot = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
-    slot.slot_mask = I2S_STD_SLOT_BOTH; 
+    slot.slot_mask = I2S_STD_SLOT_BOTH;
 
     i2s_std_gpio_config_t pins = {
       .mclk = I2S_MCLK_PIN, .bclk = I2S_BCLK_PIN, .ws = I2S_WS_PIN, .dout = I2S_GPIO_UNUSED, .din = I2S_DIN_PIN
     };
 
     i2s_std_config_t cfg = { .clk_cfg = clk, .slot_cfg = slot, .gpio_cfg = pins };
-    
+
     if (i2s_channel_init_std_mode(rx_handle, &cfg) != ESP_OK) return false;
     if (i2s_channel_enable(rx_handle) != ESP_OK) return false;
 
@@ -203,62 +197,50 @@ static bool audio_enter_rx_mode() {
     return true;
 }
 
-// ES8311 INITIALIZATION - FULL REGISTER MAP (v4.0.1)
+// =================================================================
+// ES8311 INITIALIZATION
+// =================================================================
 void initES8311() {
   Serial.println("[BOOT] Codec: Full Register Reset...");
-  Wire.setTimeOut(100); 
-  
-  // Ресет и активация
+  Wire.setTimeOut(100);
+
   es_write(0x00, 0x1F); delay(20);
   es_write(0x00, 0x80); delay(20);
-  
-  // Конфигурация системы и тактирования
-  es_write(0x01, 0x3F); // Clock Manager
-  es_write(0x02, 0x00); // MCLK/BCLK source
-  es_write(0x03, 0x10); // SDIV
-  es_write(0x04, 0x10); // BCLK / LRCK ratios
+
+  es_write(0x01, 0x3F);
+  es_write(0x02, 0x00);
+  es_write(0x03, 0x10);
+  es_write(0x04, 0x10);
   es_write(0x05, 0x00);
   es_write(0x06, 0x04);
-  es_write(0x07, 0x00); // SCLK
-  es_write(0x08, 0x40); // VMID
+  es_write(0x07, 0x00);
+  es_write(0x08, 0x40);
   es_write(0x09, 0x00);
   es_write(0x0A, 0x00);
-  
-  // Режимы I2S (Philps Standard, 16bit)
-  es_write(0x0B, 0x00); // ADC Interface
-  es_write(0x0C, 0x00); // DAC Interface
-  
-  // Тайминги
-  es_write(0x0D, 0x01); 
+  es_write(0x0B, 0x00);
+  es_write(0x0C, 0x00);
+  es_write(0x0D, 0x01);
   es_write(0x0E, 0x02);
-  
-  // Громкость и гейн
-  es_write(0x0F, 0x7F); // ADC L Volume
-  es_write(0x10, 0x00); // ADC R Volume
-  es_write(0x11, 0x7C); // ALC Control
-  es_write(0x12, 0x00); // ADC Gain 0dB
-  es_write(0x13, 0x10); // ADC High Pass Filter
-  
-  es_write(0x14, 0x7F); // DAC L Volume (Max)
-  es_write(0x15, 0x40); // DAC R Volume
-  
-  // Включение ADC/DAC
-  es_write(0x16, 0x24); // ADC Power
-  es_write(0x17, 0xD0); // DAC Power
-  
-  // Прочие настройки
+  es_write(0x0F, 0x7F);
+  es_write(0x10, 0x00);
+  es_write(0x11, 0x7C);
+  es_write(0x12, 0x00);
+  es_write(0x13, 0x10);
+  es_write(0x14, 0x7F);
+  es_write(0x15, 0x40);
+  es_write(0x16, 0x24);
+  es_write(0x17, 0xD0);
   es_write(0x18, 0x00);
   es_write(0x19, 0x00);
   es_write(0x1A, 0x00);
   es_write(0x1B, 0x00);
-  es_write(0x1C, 0x6A); // Analog Mono
-  
+  es_write(0x1C, 0x6A);
   es_write(0x31, 0x60);
   es_write(0x32, 0xBF);
   es_write(0x37, 0x48);
   es_write(0x45, 0x00);
 
-  Serial.println("[CODEC] ES8311 Ready (v4.0.1 Map)");
+  Serial.println("[CODEC] ES8311 Ready (v4.1.0)");
 }
 
 static void mic_self_test() {
@@ -273,7 +255,6 @@ static void mic_self_test() {
         g_mic_route = t.r; g_mic_slot = t.s;
         initES8311(); delay(50);
         if (!audio_enter_rx_mode()) continue;
-
         int16_t buf[512*2]; size_t br=0; int32_t peak=0;
         long start = millis();
         while(millis()-start < 1000) {
@@ -351,29 +332,56 @@ void printTextBounded(String text, uint16_t color) {
 // =================================================================
 // SD CONFIG
 // =================================================================
+// config.txt format:
+//   line 1: HuggingFace key  (hf_xxx)
+//   line 2: Groq key         (gsk_xxx)
+//   line 3: Proxy URL        (https://yourname.pythonanywhere.com)  <- NEW
+//   line 4+: RSS feeds
+// =================================================================
 bool readSDConfig() {
   File file = SD_MMC.open("/config.txt");
   if (!file) return false;
-  
-  hfApiKey = file.readStringUntil('\n'); 
+
+  hfApiKey = file.readStringUntil('\n');
   hfApiKey.replace("\r", ""); hfApiKey.trim();
-  
-  orApiKey = file.readStringUntil('\n'); 
+
+  orApiKey = file.readStringUntil('\n');
   orApiKey.replace("\r", ""); orApiKey.trim();
-  
+
+  proxyUrl = file.readStringUntil('\n');
+  proxyUrl.replace("\r", ""); proxyUrl.trim();
+  // Убираем завершающий слэш, если есть
+  if (proxyUrl.endsWith("/")) proxyUrl.remove(proxyUrl.length() - 1);
+
   while (file.available()) {
     String f = file.readStringUntil('\n');
     f.replace("\r", ""); f.trim();
     if (f.length() > 5) rssFeeds.push_back(f);
   }
   file.close();
+
+  // Резолвим URL: если есть прокси — используем его, иначе — прямые адреса
+  if (proxyUrl.length() > 5) {
+    HF_STT_URL = proxyUrl + "/stt";
+    HF_TTS_URL = proxyUrl + "/tts";
+    OR_URL     = proxyUrl + "/llm";
+    Serial.printf("[SD] Proxy mode: %s\n", proxyUrl.c_str());
+  } else {
+    HF_STT_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3-turbo";
+    HF_TTS_URL = "https://router.huggingface.co/hf-inference/models/facebook/mms-tts-rus";
+    OR_URL     = "https://api.groq.com/openai/v1/chat/completions";
+    Serial.println("[SD] Direct mode (no proxy)");
+  }
+
+  Serial.printf("[SD] HF key: %d chars | Groq key: %d chars\n",
+                hfApiKey.length(), orApiKey.length());
+  Serial.printf("[SD] STT: %s\n", HF_STT_URL.c_str());
   return true;
 }
 
 // =================================================================
 // SPEECH & TRANSCRIPTION
 // =================================================================
-
 void speakText(const String& text) {
   Serial.printf("[TTS] Speaking: %s\n", text.c_str());
   if (!wifiConnected) { printTextBounded(text, TFT_CYAN); return; }
@@ -415,12 +423,7 @@ void speakText(const String& text) {
         else { char buf[4]; sprintf(buf, "%%%02X", (unsigned char)c); enc += buf; }
     }
     String gtts = "https://translate.googleapis.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q=" + enc;
-    
-    Serial.println("[TTS] Downloading Google TTS to SD...");
-    
-    // Скачиваем аудио через HTTPClient (c правильными заголовками!), тогда сохраняем
-    // на SD и воспроизводим через connecttoFS. Это избегает
-    // проблему readSpace<br (блокировка Google в connecttohost без User-Agent).
+
     WiFiClientSecure gttsClient; gttsClient.setInsecure();
     gttsClient.setHandshakeTimeout(15000);
     HTTPClient gttsHttp; gttsHttp.begin(gttsClient, gtts);
@@ -430,7 +433,7 @@ void speakText(const String& text) {
     gttsHttp.setTimeout(15000);
     int gttsCode = gttsHttp.GET();
     Serial.printf("[TTS] Google Code: %d\n", gttsCode);
-    
+
     if (gttsCode == 200) {
       if (sdReady) {
         File f = SD_MMC.open("/tts_gtts.mp3", FILE_WRITE);
@@ -485,27 +488,26 @@ String recordAndTranscribe() {
     p += samples*2;
     float db = (peak > 0) ? 20.0f * log10f(peak / 32767.0f) : -96.0f;
     if (db > (voiced ? -38.0f : -32.0f)) { lastVoice = millis(); voiced = true; }
-    // Serial.printf("[REC] DB: %.1f\r", db); 
-    if (voiced && (millis()-lastVoice > 1000)) break; 
-    if (!voiced && (millis()-start > 4000)) break; 
+    if (voiced && (millis()-lastVoice > 1000)) break;
+    if (!voiced && (millis()-start > 4000)) break;
   }
- 
+
   int pcm_len = p - 44;
   audio_release_i2s();
   delay(50);
- 
+
   audio_enter_tx_mode();
   delay(50);
- 
+
   if (pcm_len < 3200) { free(wav); return ""; }
   writeWavHeader(wav, pcm_len);
- 
+
   String transcription = "";
   WiFiClientSecure client; client.setInsecure();
-  client.setHandshakeTimeout(15000); // 15s Handshake
+  client.setHandshakeTimeout(15000);
   HTTPClient http; http.begin(client, HF_STT_URL);
-  http.setConnectTimeout(15000); // 15s Connection timeout
-  http.setTimeout(30000); // 30s overall timeout
+  http.setConnectTimeout(15000);
+  http.setTimeout(30000);
   http.addHeader("Authorization", "Bearer " + hfApiKey);
   http.addHeader("Content-Type", "audio/wav");
   http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
@@ -527,32 +529,32 @@ String recordAndTranscribe() {
 // =================================================================
 String askRick(const String& userText) {
   WiFiClientSecure client; client.setInsecure();
-  client.setHandshakeTimeout(15000); 
+  client.setHandshakeTimeout(15000);
   HTTPClient http; http.begin(client, OR_URL);
-  http.setConnectTimeout(15000); 
-  http.addHeader("Authorization","Bearer "+orApiKey);
-  http.addHeader("Content-Type","application/json");
+  http.setConnectTimeout(15000);
+  http.addHeader("Authorization", "Bearer " + orApiKey);
+  http.addHeader("Content-Type", "application/json");
   http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
   http.addHeader("HTTP-Referer", "https://github.com/nadyalife2");
   http.addHeader("X-Title", "MelvinBot");
-  JsonDocument doc; doc["model"]=OR_MODEL;
-  JsonArray msgs=doc["messages"].to<JsonArray>();
-  JsonObject s=msgs.add<JsonObject>(); s["role"]="system"; s["content"]=SYSTEM_PROMPT;
-  JsonObject u=msgs.add<JsonObject>(); u["role"]="user"; u["content"]=userText;
-  String body; serializeJson(doc,body);
-  // DEBUG: Проверяем ключ (особенно при 403 Forbidden)
-  Serial.printf("[LLM] Key len=%d, first5=%s\n", orApiKey.length(), orApiKey.substring(0,5).c_str());
+  JsonDocument doc; doc["model"] = OR_MODEL;
+  JsonArray msgs = doc["messages"].to<JsonArray>();
+  JsonObject s = msgs.add<JsonObject>(); s["role"] = "system"; s["content"] = SYSTEM_PROMPT;
+  JsonObject u = msgs.add<JsonObject>(); u["role"] = "user";   u["content"] = userText;
+  String body; serializeJson(doc, body);
 
-  int code=http.POST(body);
+  Serial.printf("[LLM] Key len=%d, URL=%s\n", orApiKey.length(), OR_URL.c_str());
+
+  int code = http.POST(body);
   Serial.printf("[LLM] Code: %d\n", code);
-  String res="";
-  if(code==200){
+  String res = "";
+  if (code == 200) {
       JsonDocument r; deserializeJson(r, http.getString());
-      res=r["choices"][0]["message"]["content"].as<String>();
+      res = r["choices"][0]["message"]["content"].as<String>();
   } else {
       String errBody = http.getString();
       Serial.printf("[LLM] Error Body: %s\n", errBody.c_str());
-      res="Ошибка мозга Рика. Код " + String(code);
+      res = "Ошибка мозга Рика. Код " + String(code);
   }
   http.end();
   return res;
@@ -563,21 +565,21 @@ String askRick(const String& userText) {
 // =================================================================
 void setupWiFi() {
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP("Melvin-Setup","melvin123");
-  // Basic auto-connect logic simplified
-  if(sdReady) {
+  WiFi.softAP("Melvin-Setup", "melvin123");
+  if (sdReady) {
     File f = SD_MMC.open("/networks.txt");
-    if(f) {
+    if (f) {
         String line = f.readStringUntil('\n'); line.trim();
         int sep = line.indexOf(':');
-        if(sep > 0) {
+        if (sep > 0) {
             WiFi.begin(line.substring(0, sep).c_str(), line.substring(sep+1).c_str());
-            int tries=0; while(WiFi.status()!=WL_CONNECTED && tries++<20) delay(500);
-            if(WiFi.status()==WL_CONNECTED) { 
-        wifiConnected=true; 
-        Serial.println(WiFi.localIP()); 
-        configTime(3 * 3600, 0, "pool.ntp.org"); // Sync time for SSL (UTC+3)
-    }
+            int tries = 0;
+            while (WiFi.status() != WL_CONNECTED && tries++ < 20) delay(500);
+            if (WiFi.status() == WL_CONNECTED) {
+                wifiConnected = true;
+                Serial.println(WiFi.localIP());
+                configTime(3 * 3600, 0, "pool.ntp.org");
+            }
         }
         f.close();
     }
@@ -589,22 +591,22 @@ void setupWiFi() {
 // =================================================================
 void setup() {
   Serial.begin(115200);
-  delay(1000); 
-  Serial.println("\n\n[BOOT] --- MELVIN v4.0.5-TTS ---");
+  delay(1000);
+  Serial.println("\n\n[BOOT] --- MELVIN v4.1.0-PROXY ---");
 
   lcdMutex = xSemaphoreCreateMutex();
   Serial.println("[BOOT] LCD Init...");
   lcd.init(); lcd.fillScreen(TFT_BLACK);
-  
+
   pinMode(BOOT_BTN, INPUT_PULLUP);
   pinMode(PA_ENABLE, OUTPUT);
   digitalWrite(PA_ENABLE, LOW);
 
   Serial.println("[BOOT] SD Card Init...");
   SD_MMC.setPins(SDMMC_CLK_PIN, SDMMC_CMD_PIN, SDMMC_D0_PIN);
-  if (SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT)) { 
-    sdReady = true; 
-    readSDConfig(); 
+  if (SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT)) {
+    sdReady = true;
+    readSDConfig();  // <-- читает строку 3 = proxyUrl, резолвит URL
     Serial.println("[BOOT] SD Config Loaded.");
   } else {
     Serial.println("[BOOT] SD Failed!");
@@ -614,13 +616,10 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
   delay(50);
-  
-  // CRITICAL: Power up the ES8311 so I2S clocks don't deadlock!
+
   initES8311();
   delay(50);
 
-  // INITIALIZE AUDIO SINGLETON:
-  // Мы создаем объект один раз здесь, чтобы избежать утечек памяти I2S при пересоздании.
   audio = new Audio();
   audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
   audio->setVolume(12);
@@ -629,7 +628,7 @@ void setup() {
   Serial.println("[SYSTEM] Ready.");
   speakText("Рик снова в деле.");
 
-  xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
+  xTaskCreatePinnedToCore(animationTask, "anim", 8192, NULL, 1, &animationTaskHandle, 0);
 }
 
 void loop() {
@@ -644,7 +643,7 @@ void loop() {
   if (btnNow == LOW && !longFired && millis() - pressStart > 800) {
     longFired = true;
     String txt = recordAndTranscribe();
-    if(txt.length()>1) speakText(askRick(txt));
+    if (txt.length() > 1) speakText(askRick(txt));
   }
   btnPrev = btnNow;
   delay(10);
