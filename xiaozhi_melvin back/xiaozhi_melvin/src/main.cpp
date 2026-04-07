@@ -19,7 +19,7 @@
 #include "Audio.h"
 
 // =================================================================
-// MELVIN v3.9.0 - AUDIO SUBSYSTEM REFACTOR
+// MELVIN v4.0.1 - STABLE AUDIO REFACTOR (FIXED SIGNATURE)
 // =================================================================
 
 // --- GPIO PINS (STRICT MAPPING) ---
@@ -202,55 +202,62 @@ static bool audio_enter_rx_mode() {
     return true;
 }
 
-// =================================================================
-// ES8311 INITIALIZATION
-// =================================================================
+// ES8311 INITIALIZATION - FULL REGISTER MAP (v4.0.1)
 void initES8311() {
-  Serial.println("[BOOT] Codec: Setting I2C timeout...");
+  Serial.println("[BOOT] Codec: Full Register Reset...");
   Wire.setTimeOut(100); 
-  delay(20);
+  
+  // Ресет и активация
+  es_write(0x00, 0x1F); delay(20);
+  es_write(0x00, 0x80); delay(20);
+  
+  // Конфигурация системы и тактирования
+  es_write(0x01, 0x3F); // Clock Manager
+  es_write(0x02, 0x00); // MCLK/BCLK source
+  es_write(0x03, 0x10); // SDIV
+  es_write(0x04, 0x10); // BCLK / LRCK ratios
+  es_write(0x05, 0x00);
+  es_write(0x06, 0x04);
+  es_write(0x07, 0x00); // SCLK
+  es_write(0x08, 0x40); // VMID
+  es_write(0x09, 0x00);
+  es_write(0x0A, 0x00);
+  
+  // Режимы I2S (Philps Standard, 16bit)
+  es_write(0x0B, 0x00); // ADC Interface
+  es_write(0x0C, 0x00); // DAC Interface
+  
+  // Тайминги
+  es_write(0x0D, 0x01); 
+  es_write(0x0E, 0x02);
+  
+  // Громкость и гейн
+  es_write(0x0F, 0x7F); // ADC L Volume
+  es_write(0x10, 0x00); // ADC R Volume
+  es_write(0x11, 0x7C); // ALC Control
+  es_write(0x12, 0x00); // ADC Gain 0dB
+  es_write(0x13, 0x10); // ADC High Pass Filter
+  
+  es_write(0x14, 0x7F); // DAC L Volume (Max)
+  es_write(0x15, 0x40); // DAC R Volume
+  
+  // Включение ADC/DAC
+  es_write(0x16, 0x24); // ADC Power
+  es_write(0x17, 0xD0); // DAC Power
+  
+  // Прочие настройки
+  es_write(0x18, 0x00);
+  es_write(0x19, 0x00);
+  es_write(0x1A, 0x00);
+  es_write(0x1B, 0x00);
+  es_write(0x1C, 0x6A); // Analog Mono
+  
+  es_write(0x31, 0x60);
+  es_write(0x32, 0xBF);
+  es_write(0x37, 0x48);
+  es_write(0x45, 0x00);
 
-  Serial.println("[BOOT] Codec: Power Up sequence...");
-  // Сброс — точно как в рабочей прошивке MELVIN
-  es_write(0x01, 0x1F); delay(20);
-  es_write(0x01, 0x00); delay(20);  // <-- было 0x80, теперь 0x00!
-
-  // Тактирование
-  es_write(0x02, 0x00);
-  es_write(0x03, 0x10);
-  delay(10);
-
-  // AIF: I2S, 16 бит
-  es_write(0x0B, 0x00);
-  es_write(0x0C, 0x00);
-
-  // Power / System — из рабочего кода
-  es_write(0x10, 0x00);
-  es_write(0x11, 0xFC);
-  delay(10);
-
-  es_write(0x00, 0x80);  // chip enable
-  delay(10);
-
-  es_write(0x0D, 0x01);  // DAC timing
-  es_write(0x0E, 0x02);  // ADC timing
-  delay(10);
-
-  // MIC PGA +18dB (0x28)
-  es_write(0x12, 0x28);
-  es_write(0x13, 0x06);  // ADC volume (усиление)
-
-  // ADC включить
-  es_write(0x16, 0x11);
-  es_write(0x17, 0x11);
-  delay(10);
-
-  // DAC включить
-  es_write(0x14, 0x1A);
-  es_write(0x15, 0x1A);
-  delay(10);
-
-  Serial.println("[CODEC] ES8311 Ready");
+  Serial.println("[CODEC] ES8311 Ready (v4.0.1 Map)");
 }
 
 static void mic_self_test() {
@@ -565,7 +572,7 @@ void setupWiFi() {
 void setup() {
   Serial.begin(115200);
   delay(1000); 
-  Serial.println("\n\n[BOOT] --- MELVIN v3.9.5 DIAGNOSTIC ---");
+  Serial.println("\n\n[BOOT] --- MELVIN v4.0.1-Stable ---");
 
   lcdMutex = xSemaphoreCreateMutex();
   Serial.println("[BOOT] LCD Init...");
