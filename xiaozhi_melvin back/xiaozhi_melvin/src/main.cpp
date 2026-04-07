@@ -141,12 +141,17 @@ static uint8_t es_read(uint8_t reg) {
 // Проблема: ESP32-S3 имеет всего 2 I2S порта. Если постоянно удалять и создавать объект Audio,
 // драйвер ESP-IDF со временем перестает выделять каналы (ошибка no available channel found).
 // Решение: Используем глобальный синглтон Audio и только переключаем режимы.
+// Остановка I2S сервисов (RX удаляем, TX только останавливаем)
 static void audio_release_i2s() {
-    Serial.println("[AUDIO] Stopping TX/RX...");
+    Serial.println("[AUDIO] Stopping RX/TX...");
+    
+    // Останавливаем воспроизведение, но НЕ удаляем объект Audio,
+    // чтобы не тратить I2S порты и не ждать пересоздания DMA дескрипторов.
     if (audio) {
-        audio->stopSong(); 
-        // НЕ удаляем объект, чтобы не плодить утечки дескрипторов I2S
+        audio->stopSong();
     }
+
+    // Микрофон (RX) удаляем полностью, так как он на отдельном порту I2S_NUM_1
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
         i2s_del_channel(rx_handle);
@@ -162,14 +167,10 @@ static void audio_enter_tx_mode() {
     audio_release_i2s();
     Serial.println("[AUDIO] TX MODE Start");
     
-    // ПРИНУДИТЕЛЬНЫЙ ПЕРЕХВАТ ПИНОВ:
-    // Когда микрофон (RX) выключается, он может оставить пины MCLK/BCLK в неопределенном состоянии.
-    // Вызов setPinout заставляет библиотеку Audio заново "застолбить" GPIO Matrix для Speaker.
-    if (audio) {
-        // ВАЖНО: В этой версии библиотеки 4 аргумента: BCLK, LRC, DOUT, MCLK
-        audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
-        audio->setVolume(12);
-    }
+    // ВАЖНО: Мы больше НЕ вызываем setPinout здесь.
+    // Объект Audio создан в setup() и уже привязан к I2S_NUM_0 через setPinout один раз.
+    // Повторный вызов setPinout внутри библиотеки Audio приводит 
+    // к пересозданию канала и утечке (no available channel found).
 
     digitalWrite(PA_ENABLE, HIGH);
     delay(50);
@@ -353,9 +354,18 @@ void printTextBounded(String text, uint16_t color) {
 bool readSDConfig() {
   File file = SD_MMC.open("/config.txt");
   if (!file) return false;
-  hfApiKey = file.readStringUntil('\n'); hfApiKey.trim();
-  orApiKey = file.readStringUntil('\n'); orApiKey.trim();
-  while(file.available()){ String f=file.readStringUntil('\n'); f.trim(); if(f.length()>5) rssFeeds.push_back(f); }
+  
+  hfApiKey = file.readStringUntil('\n'); 
+  hfApiKey.replace("\r", ""); hfApiKey.trim();
+  
+  orApiKey = file.readStringUntil('\n'); 
+  orApiKey.replace("\r", ""); orApiKey.trim();
+  
+  while (file.available()) {
+    String f = file.readStringUntil('\n');
+    f.replace("\r", ""); f.trim();
+    if (f.length() > 5) rssFeeds.push_back(f);
+  }
   file.close();
   return true;
 }
@@ -525,6 +535,9 @@ String askRick(const String& userText) {
   JsonObject s=msgs.add<JsonObject>(); s["role"]="system"; s["content"]=SYSTEM_PROMPT;
   JsonObject u=msgs.add<JsonObject>(); u["role"]="user"; u["content"]=userText;
   String body; serializeJson(doc,body);
+  // DEBUG: Проверяем ключ (особенно при 403 Forbidden)
+  Serial.printf("[LLM] Key len=%d, first5=%s\n", orApiKey.length(), orApiKey.substring(0,5).c_str());
+
   int code=http.POST(body);
   Serial.printf("[LLM] Code: %d\n", code);
   String res="";
@@ -572,7 +585,7 @@ void setupWiFi() {
 void setup() {
   Serial.begin(115200);
   delay(1000); 
-  Serial.println("\n\n[BOOT] --- MELVIN v4.0.3-Unified ---");
+  Serial.println("\n\n[BOOT] --- MELVIN v4.0.4-Final ---");
 
   lcdMutex = xSemaphoreCreateMutex();
   Serial.println("[BOOT] LCD Init...");
