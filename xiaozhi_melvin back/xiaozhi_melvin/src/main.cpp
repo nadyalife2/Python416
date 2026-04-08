@@ -158,7 +158,7 @@ static void audio_enter_tx_mode() {
     audio_release_i2s();
     Serial.println("[AUDIO] TX MODE Start");
     digitalWrite(PA_ENABLE, HIGH);
-    delay(50);
+    delay(100);
 }
 
 static bool audio_enter_rx_mode() {
@@ -203,6 +203,8 @@ void initES8311() {
   es_write(0x05, 0x00);
   es_write(0x06, 0x04);
   es_write(0x07, 0x00);
+  es_write(0x08, 0xFF);
+  delay(150);
   es_write(0x08, 0x40);
   es_write(0x09, 0x00);
   es_write(0x0A, 0x00);
@@ -232,7 +234,7 @@ void initES8311() {
   es_write(0x1C, 0x6A);
   
   es_write(0x31, 0x60);
-  es_write(0x32, 0xBF);
+  es_write(0x32, 0x00);
   es_write(0x37, 0x48);
   es_write(0x45, 0x00);
 
@@ -429,7 +431,12 @@ String recordAndTranscribe() {
   const int MAX_S = 8;
   const int PCM_SIZE = MAX_S * 16000 * 2;
   uint8_t* wav = (uint8_t*)ps_malloc(PCM_SIZE + 44);
-  if(!wav) { audio_release_i2s(); return ""; }
+  if(!wav) {
+    Serial.printf("[REC] ps_malloc FAILED! PSRAM free: %d\n", ESP.getFreePsram());
+    audio_release_i2s();
+    return "";
+  }
+  Serial.printf("[REC] Buffer OK, PSRAM free: %d\n", ESP.getFreePsram());
 
   int16_t dma[512*2]; size_t br=0; int p=44;
   long start = millis(), lastVoice = millis();
@@ -578,12 +585,13 @@ void setup() {
   Wire.setClock(100000);
   delay(50);
   
-  initES8311();
-  delay(50);
-
   audio = new Audio();
   audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
   audio->setVolume(12);
+  delay(100);
+
+  initES8311();
+  delay(50);
 
   setupWiFi();
   Serial.println("[SYSTEM] Ready.");
