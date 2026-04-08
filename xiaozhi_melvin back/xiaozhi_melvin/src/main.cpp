@@ -83,7 +83,9 @@ static MicSlot  g_mic_slot  = MIC_SLOT_RIGHT;
 enum EmotionState { NEUTRAL, THINKING, HAPPY, NEWS, ERROR_STATE, LISTENING, SPEAKING, EMO_WIFI_AP };
 volatile EmotionState currentEmotion = NEUTRAL;
 SemaphoreHandle_t lcdMutex;
+SemaphoreHandle_t stateMutex;
 TaskHandle_t animationTaskHandle;
+TaskHandle_t voiceTaskHandle;
 
 volatile int connState = 0;
 String connIP = "";
@@ -143,6 +145,7 @@ static void audio_release_i2s() {
     Serial.println("[AUDIO] Stopping RX/TX...");
     if (audio) {
         audio->stopSong();
+        audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
     }
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
@@ -252,7 +255,10 @@ void animationTask(void *pvParameters) {
     face.fillSprite(TFT_BLACK);
     int cx = 120, cy = 70;
     unsigned long t = millis();
-    switch (currentEmotion) {
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    EmotionState current = currentEmotion;
+    xSemaphoreGive(stateMutex);
+    switch (current) {
       case NEUTRAL:
         face.fillRect(cx-50,cy-20,30,10,TFT_WHITE);
         face.fillRect(cx+20,cy-20,30,10,TFT_WHITE);
@@ -341,8 +347,14 @@ bool readSDConfig() {
 
 void speakText(const String& text) {
   Serial.printf("[TTS] Speaking: %s\n", text.c_str());
-  if (!wifiConnected) { printTextBounded(text, TFT_CYAN); return; }
+  if (!wifiConnected) {
+    printTextBounded(text, TFT_CYAN);
+    Serial.println("[TTS] No WiFi — text only mode");
+    return;
+  }
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
   currentEmotion = SPEAKING;
+  xSemaphoreGive(stateMutex);
   printTextBounded(text, TFT_CYAN);
 
   bool played = false;
@@ -419,13 +431,18 @@ void speakText(const String& text) {
     } else { gttsHttp.end(); }
   }
 
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
   currentEmotion = NEUTRAL;
+  xSemaphoreGive(stateMutex);
 }
 
 String recordAndTranscribe() {
   audio_release_i2s();
   if (!wifiConnected) return "";
-  currentEmotion = LISTENING; printTextBounded("LISTENING...", TFT_MAGENTA);
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  currentEmotion = LISTENING;
+  xSemaphoreGive(stateMutex);
+  printTextBounded("LISTENING...", TFT_MAGENTA);
   if (!audio_enter_rx_mode()) return "";
 
   const int MAX_S = 8;
@@ -553,12 +570,23 @@ void setupWiFi() {
 // =================================================================
 // CORE SETUP & LOOP
 // =================================================================
+void voiceTask(void* pvParameters) {
+  while(true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    String txt = recordAndTranscribe();
+    if(txt.length() > 1) {
+      speakText(askRick(txt));
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000); 
   Serial.println("\n\n[BOOT] --- MELVIN v4.0.7-BootFix ---");
 
   lcdMutex = xSemaphoreCreateMutex();
+  stateMutex = xSemaphoreCreateMutex();
   Serial.println("[BOOT] LCD Init...");
   lcd.init(); lcd.fillScreen(TFT_BLACK);
   
@@ -566,6 +594,8 @@ void setup() {
   // чтобы экран не висел черным во время настройки WiFi и SD.
   xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
   
+  xTaskCreatePinnedToCore(voiceTask, "voice", 16384, NULL, 2, &voiceTaskHandle, 1);
+
   pinMode(BOOT_BTN, INPUT_PULLUP);
   pinMode(PA_ENABLE, OUTPUT);
   digitalWrite(PA_ENABLE, LOW);
@@ -611,8 +641,7 @@ void loop() {
   if (btnPrev == HIGH && btnNow == LOW) { pressStart = millis(); longFired = false; }
   if (btnNow == LOW && !longFired && millis() - pressStart > 800) {
     longFired = true;
-    String txt = recordAndTranscribe();
-    if(txt.length()>1) speakText(askRick(txt));
+    xTaskNotifyGive(voiceTaskHandle);
   }
   btnPrev = btnNow;
   delay(10);
