@@ -469,8 +469,26 @@ String recordAndTranscribe() {
         if(abs(s)>peak) peak=abs(s);
     }
     p += samples*2;
-    float db = (peak > 0) ? 20.0f * log10f(peak / 32767.0f) : -96.0f;
-    if (db > (voiced ? -38.0f : -32.0f)) { lastVoice = millis(); voiced = true; }
+
+    int zero_crossings = 0;
+    int last_sign = 0;
+    long long energy = 0;
+    for(int i=0; i<samples; i++) {
+        int16_t s = (g_mic_slot == MIC_SLOT_LEFT) ? dma[i*2] : dma[i*2+1];
+        int sign = (s > 0) ? 1 : ((s < 0) ? -1 : 0);
+        if (last_sign != 0 && sign != 0 && sign != last_sign) zero_crossings++;
+        last_sign = sign;
+        energy += s * s;
+    }
+
+    if (samples > 0) {
+        float avg_energy = energy / (float)samples;
+        float db = (peak > 0) ? 20.0f * log10f(peak / 32767.0f) : -96.0f;
+
+        if (db > (voiced ? -38.0f : -32.0f) && zero_crossings > 10 && avg_energy > 500) {
+            lastVoice = millis(); voiced = true;
+        }
+    }
     if (voiced && (millis()-lastVoice > 1000)) break; 
     if (!voiced && (millis()-start > 4000)) break; 
   }
