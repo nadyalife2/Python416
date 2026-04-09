@@ -18,9 +18,30 @@
 #include "Display.h"
 #include "Audio.h"
 
-// =================================================================
-// MELVIN v4.0.2 - PROXY TUNNEL SUPPORT
-// =================================================================
+/**
+ * =================================================================
+ * DEVELOPMENT LOG & BUGFIX HISTORY (v4.1.9)
+ * =================================================================
+ * 1. [I2S LEAK]: Fixed "no available channel found" error. 
+ *    PROBLEM: ESP32-audioI2S doesn't release I2S0 on setPinout().
+ *    SOLUTION: Atomic Re-creation Strategy. delete audio/new Audio() 
+ *    during TX/RX switching.
+ * 
+ * 2. [I2C LOCK]: Fixed "could not acquire lock" in Wire.cpp.
+ *    PROBLEM: Missing Wire.begin() and bus contention with animation task.
+ *    SOLUTION: Moved Wire.begin(15, 14) to start of setup() and 
+ *    delayed animationTask start.
+ * 
+ * 3. [SILENCE FIX]: Fixed quiet/missing audio.
+ *    PROBLEM: Volume was set to 12 (too low). Mutex-locking logic 
+ *    in speakText was unsafe during re-creation.
+ *    SOLUTION: Set volume to 21. Added double-check if(audio) inside 
+ *    mutex-protected zones.
+ * 
+ * 4. [ADVANCED VAD]: Integrated ZCR (Zero-Crossing Rate) logic from PR #1.
+ *    Reduces false triggers from background noise.
+ * =================================================================
+ */
 
 // --- GPIO PINS (STRICT MAPPING) ---
 #define BOOT_BTN      0
@@ -83,6 +104,10 @@ static MicSlot  g_mic_slot  = MIC_SLOT_RIGHT;
 enum EmotionState { NEUTRAL, THINKING, HAPPY, NEWS, ERROR_STATE, LISTENING, SPEAKING, EMO_WIFI_AP };
 volatile EmotionState currentEmotion = NEUTRAL;
 SemaphoreHandle_t lcdMutex;
+SemaphoreHandle_t stateMutex;
+// FIX #1: Mutex for the Audio object to prevent race conditions 
+// between loop() (Core 0) and speakText() (Core 1)
+SemaphoreHandle_t audioMutex;
 TaskHandle_t animationTaskHandle;
 
 volatile int connState = 0;
@@ -91,9 +116,9 @@ String connIP = "";
 // =================================================================
 // BOD DISABLE
 // =================================================================
-static void __attribute__((constructor(101))) disable_bod() {
-  REG_CLR_BIT(RTC_CNTL_BROWN_OUT_REG, RTC_CNTL_BROWN_OUT_ENA);
-}
+// static void __attribute__((constructor(101))) disable_bod() {
+//   REG_CLR_BIT(RTC_CNTL_BROWN_OUT_REG, RTC_CNTL_BROWN_OUT_ENA);
+// }
 
 // =================================================================
 // WAV HEADER GENERATOR
@@ -116,6 +141,24 @@ void writeWavHeader(uint8_t* hdr, uint32_t dataBytes) {
 }
 
 // =================================================================
+// SD FILE LISTER (DIAGNOSTIC)
+void listSDFiles(File dir, int numTabs) {
+  while (true) {
+    File entry = dir.openNextFile();
+    if (!entry) break;
+    for (uint8_t i = 0; i < numTabs; i++) Serial.print('\t');
+    Serial.print(entry.name());
+    if (entry.isDirectory()) {
+      Serial.println("/");
+      listSDFiles(entry, numTabs + 1);
+    } else {
+      Serial.print("\t\t");
+      Serial.println(entry.size(), DEC);
+    }
+    entry.close();
+  }
+}
+
 // ES8311 I2C HELPERS
 // =================================================================
 static bool es_write(uint8_t reg, uint8_t val) {
@@ -139,11 +182,21 @@ static uint8_t es_read(uint8_t reg) {
 // =================================================================
 // AUDIO LIFECYCLE MANAGER
 // =================================================================
+// FIX: Redundant setPinout caused I2S resource leaks. 
+// Standard ESP32-audioI2S doesn't fully release I2S0 until the object is deleted.
+// We use a "Re-creation Strategy" to ensure I2S ports are freed for RX mode.
 static void audio_release_i2s() {
-    Serial.println("[AUDIO] Stopping RX/TX...");
+    Serial.println("[AUDIO] Stopping RX/TX (Atomic Release)...");
+    xSemaphoreTake(audioMutex, portMAX_DELAY);
     if (audio) {
         audio->stopSong();
+        delete audio; 
+        audio = NULL; // Prevent null pointer calls in loop()
+        // Wait for internal library tasks to settle
+        delay(150); 
     }
+    xSemaphoreGive(audioMutex);
+
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
         i2s_del_channel(rx_handle);
@@ -156,9 +209,18 @@ static void audio_release_i2s() {
 
 static void audio_enter_tx_mode() {
     audio_release_i2s();
-    Serial.println("[AUDIO] TX MODE Start");
+    Serial.println("[AUDIO] TX MODE Start (Re-creating Audio Object)");
+    
+    // Re-create the Audio object from scratch to force a fresh I2S0 initialization.
+    // This is the most reliable way to fix "no available channel found" on ESP32-S3.
+    xSemaphoreTake(audioMutex, portMAX_DELAY);
+    audio = new Audio();
+    audio->setPinout(I2S_BCLK_PIN, I2S_WS_PIN, I2S_DOUT_PIN, I2S_MCLK_PIN);
+    audio->setVolume(21); // Increased for SpotPear speaker clarity
+    xSemaphoreGive(audioMutex);
+    
     digitalWrite(PA_ENABLE, HIGH);
-    delay(50);
+    delay(100); 
 }
 
 static bool audio_enter_rx_mode() {
@@ -190,12 +252,14 @@ static bool audio_enter_rx_mode() {
 
 // ES8311 INITIALIZATION
 void initES8311() {
-  Serial.println("[BOOT] Codec: Full Register Reset...");
+  Serial.println("[BOOT] Codec: Advanced Init (PR #1 Logic)...");
   Wire.setTimeOut(100); 
-  
+
+  // Block 1.1: VMID Fast Charge & Reset
   es_write(0x00, 0x1F); delay(20);
   es_write(0x00, 0x80); delay(20);
-  
+
+  // Clocking settings
   es_write(0x01, 0x3F);
   es_write(0x02, 0x00);
   es_write(0x03, 0x10);
@@ -203,40 +267,47 @@ void initES8311() {
   es_write(0x05, 0x00);
   es_write(0x06, 0x04);
   es_write(0x07, 0x00);
+  
+  // PLL/LRCK stabilization delay
+  es_write(0x08, 0xFF);
+  delay(150);
   es_write(0x08, 0x40);
+  
   es_write(0x09, 0x00);
   es_write(0x0A, 0x00);
-  
+
+  // AIF Standard I2S 16bit
   es_write(0x0B, 0x00);
   es_write(0x0C, 0x00);
-  
+
+  // Block 1.2: Power on sequence & VMID
   es_write(0x0D, 0x01); 
   es_write(0x0E, 0x02);
-  
   es_write(0x0F, 0x7F);
   es_write(0x10, 0x00);
   es_write(0x11, 0x7C);
   es_write(0x12, 0x00);
   es_write(0x13, 0x10);
-  
+
+  // Gain and Volume
   es_write(0x14, 0x7F);
   es_write(0x15, 0x40);
-  
   es_write(0x16, 0x24);
-  es_write(0x17, 0xD0);
-  
+  es_write(0x17, 0x88);
+
   es_write(0x18, 0x00);
   es_write(0x19, 0x00);
   es_write(0x1A, 0x00);
   es_write(0x1B, 0x00);
   es_write(0x1C, 0x6A);
-  
+
+  // Block 1.3: DAC Unmute & Final Config
   es_write(0x31, 0x60);
-  es_write(0x32, 0xBF);
+  es_write(0x32, 0x00);
   es_write(0x37, 0x48);
   es_write(0x45, 0x00);
 
-  Serial.println("[CODEC] ES8311 Ready (v4.0.2 Map)");
+  Serial.println("[CODEC] ES8311 Initialized (Block 1 fixes applied)");
 }
 
 // =================================================================
@@ -250,7 +321,10 @@ void animationTask(void *pvParameters) {
     face.fillSprite(TFT_BLACK);
     int cx = 120, cy = 70;
     unsigned long t = millis();
-    switch (currentEmotion) {
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    EmotionState emo = currentEmotion;
+    xSemaphoreGive(stateMutex);
+    switch (emo) {
       case NEUTRAL:
         face.fillRect(cx-50,cy-20,30,10,TFT_WHITE);
         face.fillRect(cx+20,cy-20,30,10,TFT_WHITE);
@@ -339,8 +413,14 @@ bool readSDConfig() {
 
 void speakText(const String& text) {
   Serial.printf("[TTS] Speaking: %s\n", text.c_str());
-  if (!wifiConnected) { printTextBounded(text, TFT_CYAN); return; }
+  if (!wifiConnected) { 
+    printTextBounded(text, TFT_CYAN); 
+    Serial.println("[TTS] No WiFi — text only mode"); 
+    return; 
+  }
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
   currentEmotion = SPEAKING;
+  xSemaphoreGive(stateMutex);
   printTextBounded(text, TFT_CYAN);
 
   bool played = false;
@@ -352,7 +432,9 @@ void speakText(const String& text) {
     http.addHeader("Authorization", "Bearer " + hfApiKey);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-    http.setTimeout(25000);
+    // Если мы только что загрузились, ставим короткий таймаут
+    int timeoutMs = (millis() < 30000) ? 4000 : 25000;
+    http.setTimeout(timeoutMs);
     String escaped = text; escaped.replace("\"", "\\\"");
     Serial.println("[TTS] Sending POST to Proxy...");
     int code = http.POST("{\"inputs\":\"" + escaped + "\"}");
@@ -362,9 +444,27 @@ void speakText(const String& text) {
       if (f) {
         http.writeToStream(&f); f.close();
         audio_enter_tx_mode();
-        audio->connecttoFS(SD_MMC, "/tts_out.flac");
-        while(audio->isRunning()) { audio->loop(); delay(1); }
-        audio->stopSong();
+        xSemaphoreTake(audioMutex, portMAX_DELAY);
+        if (audio) {
+          audio->connecttoFS(SD_MMC, "/tts_out.flac");
+          while(true) {
+            bool running = false;
+            if (audio) running = audio->isRunning();
+            
+            if (running) audio->loop();
+            xSemaphoreGive(audioMutex);
+            
+            if (!running) break;
+            
+            // Allow other tasks (like voiceTask) to potentially delete 'audio'
+            delay(1); 
+            
+            xSemaphoreTake(audioMutex, portMAX_DELAY);
+            if (!audio) { xSemaphoreGive(audioMutex); break; }
+          }
+          if (audio) audio->stopSong();
+        }
+        xSemaphoreGive(audioMutex);
         played = true;
       }
     }
@@ -401,52 +501,98 @@ void speakText(const String& text) {
           f.close();
           gttsHttp.end();
           audio_enter_tx_mode();
+          xSemaphoreTake(audioMutex, portMAX_DELAY);
           audio->connecttoFS(SD_MMC, "/tts_gtts.mp3");
+          
           unsigned long start = millis(), lastPosTime = millis();
           uint32_t lastPos = 0;
-          while(audio->isRunning() && (millis() - start < 15000)) {
-              audio->loop();
+          while(millis() - start < 15000) {
+              bool running = audio->isRunning();
+              if (running) audio->loop();
               uint32_t currentPos = audio->getAudioCurrentTime();
+              xSemaphoreGive(audioMutex);
+              if (!running) break;
+              
               if (currentPos != lastPos) { lastPos = currentPos; lastPosTime = millis(); }
               if (millis() - lastPosTime > 2000) { Serial.println("[AUDIO] SD TTS timeout!"); break; }
               delay(2);
+              xSemaphoreTake(audioMutex, portMAX_DELAY);
           }
-          audio->stopSong(); played = true;
+          audio->stopSong();
+          xSemaphoreGive(audioMutex);
+          played = true;
         } else { gttsHttp.end(); }
       } else { gttsHttp.end(); }
     } else { gttsHttp.end(); }
   }
 
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
   currentEmotion = NEUTRAL;
+  xSemaphoreGive(stateMutex);
 }
 
 String recordAndTranscribe() {
   audio_release_i2s();
   if (!wifiConnected) return "";
-  currentEmotion = LISTENING; printTextBounded("LISTENING...", TFT_MAGENTA);
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  currentEmotion = LISTENING; 
+  xSemaphoreGive(stateMutex);
+  printTextBounded("LISTENING...", TFT_MAGENTA);
   if (!audio_enter_rx_mode()) return "";
 
   const int MAX_S = 8;
   const int PCM_SIZE = MAX_S * 16000 * 2;
   uint8_t* wav = (uint8_t*)ps_malloc(PCM_SIZE + 44);
-  if(!wav) { audio_release_i2s(); return ""; }
+  if(!wav) {
+    Serial.printf("[REC] ps_malloc FAILED! PSRAM free: %d\n", ESP.getFreePsram()); // (Block 1.6)
+    audio_release_i2s();
+    return "";
+  }
+  Serial.printf("[REC] Buffer OK, PSRAM free: %d\n", ESP.getFreePsram());
 
   int16_t dma[512*2]; size_t br=0; int p=44;
   long start = millis(), lastVoice = millis();
   bool voiced = false;
 
+  // Block 3.1: VAD initialization
+  int zero_crossings = 0;
+  int last_sign = 0;
+  long long energy = 0;
+
   while(millis()-start < MAX_S*1000) {
     if(p + 2048 > PCM_SIZE + 44) break;
     i2s_channel_read(rx_handle, dma, 2048, &br, 100);
-    int samples = br/4; int32_t peak=0;
+    int samples = br/4; 
+    int32_t peak = 0;
+    zero_crossings = 0;
+    energy = 0;
+
     for(int i=0; i<samples; i++) {
         int16_t s = (g_mic_slot == MIC_SLOT_LEFT) ? dma[i*2] : dma[i*2+1];
         ((int16_t*)(wav+p))[i] = s;
-        if(abs(s)>peak) peak=abs(s);
+        if(abs(s) > peak) peak = abs(s);
+        
+        // Zero-Crossing Rate (ZCR) Calculation
+        int sign = (s > 0) ? 1 : ((s < 0) ? -1 : 0);
+        if (last_sign != 0 && sign != 0 && sign != last_sign) zero_crossings++;
+        last_sign = sign;
+        
+        // Energy Calculation
+        energy += (long long)s * s;
     }
-    p += samples*2;
-    float db = (peak > 0) ? 20.0f * log10f(peak / 32767.0f) : -96.0f;
-    if (db > (voiced ? -38.0f : -32.0f)) { lastVoice = millis(); voiced = true; }
+    p += samples * 2;
+
+    if (samples > 0) {
+        float avg_energy = energy / (float)samples;
+        float db = (peak > 0) ? 20.0f * log10f(peak / 32767.0f) : -96.0f;
+        
+        // Block 3.2: Advanced VAD Trigger (ZCR > 10, high energy, dB threshold)
+        if (db > (voiced ? -38.0f : -32.0f) && zero_crossings > 10 && avg_energy > 500) { 
+            lastVoice = millis(); 
+            voiced = true; 
+        }
+    }
+
     if (voiced && (millis()-lastVoice > 1000)) break; 
     if (!voiced && (millis()-start > 4000)) break; 
   }
@@ -496,6 +642,11 @@ String askRick(const String& userText) {
   http.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
   http.addHeader("HTTP-Referer", "https://github.com/nadyalife2");
   http.addHeader("X-Title", "MelvinBot");
+
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  currentEmotion = THINKING;
+  xSemaphoreGive(stateMutex);
+
   JsonDocument doc; doc["model"]=OR_MODEL;
   JsonArray msgs=doc["messages"].to<JsonArray>();
   JsonObject s=msgs.add<JsonObject>(); s["role"]="system"; s["content"]=SYSTEM_PROMPT;
@@ -546,18 +697,48 @@ void setupWiFi() {
 // =================================================================
 // CORE SETUP & LOOP
 // =================================================================
+// =================================================================
+// VOICE TASK (Block 2.4 - FreeRTOS)
+// =================================================================
+TaskHandle_t voiceTaskHandle = NULL;
+
+void voiceTask(void* pvParameters) {
+  while(true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // Wait for button signal
+    Serial.println("[VOICE] Task triggered");
+    String txt = recordAndTranscribe();
+    if(txt.length() > 1) speakText(askRick(txt));
+    else Serial.println("[VOICE] No speech detected or empty transcription.");
+  }
+}
+
+  // FIX #2: Greeting as a one-shot task to avoid blocking setup()
+static void greetingTask(void* pvParameters) {
+  vTaskDelay(pdMS_TO_TICKS(500)); // Wait for system to settle
+  speakText("Рик снова в деле.");
+  vTaskDelete(NULL);
+}
+
 void setup() {
+  // GPIO45 — страп-пин, прижать LOW для корректного напряжения Flash при загрузке.
+  pinMode(45, INPUT_PULLDOWN);
+  delay(100);
+
   Serial.begin(115200);
   delay(1000); 
-  Serial.println("\n\n[BOOT] --- MELVIN v4.0.7-BootFix ---");
+  Serial.println("\n\n[BOOT] --- MELVIN v4.1.9-PR1-Merged ---");
 
   lcdMutex = xSemaphoreCreateMutex();
+  stateMutex = xSemaphoreCreateMutex();
+  audioMutex = xSemaphoreCreateMutex();
+
+  // FIX #1: Explicitly initialize I2C before any other hardware calls.
+  // This prevents the "could not acquire lock" errors on Wire.
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(400000); // 400kHz Fast Mode
+
   Serial.println("[BOOT] LCD Init...");
   lcd.init(); lcd.fillScreen(TFT_BLACK);
-  
-  // КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Запускаем анимацию СРАЗУ, 
-  // чтобы экран не висел черным во время настройки WiFi и SD.
-  xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
   
   pinMode(BOOT_BTN, INPUT_PULLUP);
   pinMode(PA_ENABLE, OUTPUT);
@@ -573,27 +754,37 @@ void setup() {
     Serial.println("[BOOT] SD Failed!");
   }
 
-  Serial.println("[BOOT] I2C Init...");
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);
-  delay(50);
-  
+  // FIX #2: Move animation task creation AFTER I2C/SD init to avoid bus contention 
+  // during the very first milliseconds of boot.
+  xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
+
+  audio = new Audio();
+  audio->setPinout(I2S_BCLK_PIN, I2S_WS_PIN, I2S_DOUT_PIN, I2S_MCLK_PIN);
+  audio->setVolume(12);
+  delay(100); 
+
   initES8311();
   delay(50);
 
-  audio = new Audio();
-  audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
-  audio->setVolume(12);
-
   setupWiFi();
   Serial.println("[SYSTEM] Ready.");
-  
-  // Приветствие в самом конце, чтобы не блокировать loop() при ошибках сети
-  speakText("Рик снова в деле.");
+
+  // Launch greeting in a separate task
+  xTaskCreate(greetingTask, "greet", 8192, NULL, 1, NULL);
+
+  // Block 2.4: Launch voice task on Core 1
+  xTaskCreatePinnedToCore(voiceTask, "voice", 16384, NULL, 2, &voiceTaskHandle, 1);
 }
 
+
 void loop() {
-  if (audio) audio->loop();
+  // CRITICAL: Check 'audio' twice (before and inside mutex) 
+  // because it can be deleted/recreated during mode switching.
+  if (audio) {
+    xSemaphoreTake(audioMutex, portMAX_DELAY);
+    if (audio) audio->loop(); 
+    xSemaphoreGive(audioMutex);
+  }
 
   static bool btnPrev = HIGH;
   static unsigned long pressStart = 0;
@@ -603,8 +794,7 @@ void loop() {
   if (btnPrev == HIGH && btnNow == LOW) { pressStart = millis(); longFired = false; }
   if (btnNow == LOW && !longFired && millis() - pressStart > 800) {
     longFired = true;
-    String txt = recordAndTranscribe();
-    if(txt.length()>1) speakText(askRick(txt));
+    if (voiceTaskHandle) xTaskNotifyGive(voiceTaskHandle); // Signal voice task
   }
   btnPrev = btnNow;
   delay(10);
