@@ -145,7 +145,8 @@ static void audio_release_i2s() {
     Serial.println("[AUDIO] Stopping RX/TX...");
     if (audio) {
         audio->stopSong();
-        audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
+        delete audio;
+        audio = nullptr;
     }
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
@@ -160,6 +161,13 @@ static void audio_release_i2s() {
 static void audio_enter_tx_mode() {
     audio_release_i2s();
     Serial.println("[AUDIO] TX MODE Start");
+
+    if (!audio) {
+        audio = new Audio();
+        audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
+        audio->setVolume(12);
+    }
+
     digitalWrite(PA_ENABLE, HIGH);
     delay(100);
 }
