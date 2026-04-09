@@ -83,7 +83,9 @@ static MicSlot  g_mic_slot  = MIC_SLOT_RIGHT;
 enum EmotionState { NEUTRAL, THINKING, HAPPY, NEWS, ERROR_STATE, LISTENING, SPEAKING, EMO_WIFI_AP };
 volatile EmotionState currentEmotion = NEUTRAL;
 SemaphoreHandle_t lcdMutex;
+SemaphoreHandle_t stateMutex;
 TaskHandle_t animationTaskHandle;
+TaskHandle_t voiceTaskHandle;
 
 volatile int connState = 0;
 String connIP = "";
@@ -143,6 +145,8 @@ static void audio_release_i2s() {
     Serial.println("[AUDIO] Stopping RX/TX...");
     if (audio) {
         audio->stopSong();
+        delete audio;
+        audio = nullptr;
     }
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
@@ -157,8 +161,15 @@ static void audio_release_i2s() {
 static void audio_enter_tx_mode() {
     audio_release_i2s();
     Serial.println("[AUDIO] TX MODE Start");
+
+    if (!audio) {
+        audio = new Audio();
+        audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
+        audio->setVolume(12);
+    }
+
     digitalWrite(PA_ENABLE, HIGH);
-    delay(50);
+    delay(100);
 }
 
 static bool audio_enter_rx_mode() {
@@ -203,6 +214,8 @@ void initES8311() {
   es_write(0x05, 0x00);
   es_write(0x06, 0x04);
   es_write(0x07, 0x00);
+  es_write(0x08, 0xFF);
+  delay(150);
   es_write(0x08, 0x40);
   es_write(0x09, 0x00);
   es_write(0x0A, 0x00);
@@ -232,7 +245,7 @@ void initES8311() {
   es_write(0x1C, 0x6A);
   
   es_write(0x31, 0x60);
-  es_write(0x32, 0xBF);
+  es_write(0x32, 0x00);
   es_write(0x37, 0x48);
   es_write(0x45, 0x00);
 
@@ -250,7 +263,10 @@ void animationTask(void *pvParameters) {
     face.fillSprite(TFT_BLACK);
     int cx = 120, cy = 70;
     unsigned long t = millis();
-    switch (currentEmotion) {
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    EmotionState current = currentEmotion;
+    xSemaphoreGive(stateMutex);
+    switch (current) {
       case NEUTRAL:
         face.fillRect(cx-50,cy-20,30,10,TFT_WHITE);
         face.fillRect(cx+20,cy-20,30,10,TFT_WHITE);
@@ -339,8 +355,14 @@ bool readSDConfig() {
 
 void speakText(const String& text) {
   Serial.printf("[TTS] Speaking: %s\n", text.c_str());
-  if (!wifiConnected) { printTextBounded(text, TFT_CYAN); return; }
+  if (!wifiConnected) {
+    printTextBounded(text, TFT_CYAN);
+    Serial.println("[TTS] No WiFi — text only mode");
+    return;
+  }
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
   currentEmotion = SPEAKING;
+  xSemaphoreGive(stateMutex);
   printTextBounded(text, TFT_CYAN);
 
   bool played = false;
@@ -417,19 +439,29 @@ void speakText(const String& text) {
     } else { gttsHttp.end(); }
   }
 
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
   currentEmotion = NEUTRAL;
+  xSemaphoreGive(stateMutex);
 }
 
 String recordAndTranscribe() {
   audio_release_i2s();
   if (!wifiConnected) return "";
-  currentEmotion = LISTENING; printTextBounded("LISTENING...", TFT_MAGENTA);
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  currentEmotion = LISTENING;
+  xSemaphoreGive(stateMutex);
+  printTextBounded("LISTENING...", TFT_MAGENTA);
   if (!audio_enter_rx_mode()) return "";
 
   const int MAX_S = 8;
   const int PCM_SIZE = MAX_S * 16000 * 2;
   uint8_t* wav = (uint8_t*)ps_malloc(PCM_SIZE + 44);
-  if(!wav) { audio_release_i2s(); return ""; }
+  if(!wav) {
+    Serial.printf("[REC] ps_malloc FAILED! PSRAM free: %d\n", ESP.getFreePsram());
+    audio_release_i2s();
+    return "";
+  }
+  Serial.printf("[REC] Buffer OK, PSRAM free: %d\n", ESP.getFreePsram());
 
   int16_t dma[512*2]; size_t br=0; int p=44;
   long start = millis(), lastVoice = millis();
@@ -445,8 +477,26 @@ String recordAndTranscribe() {
         if(abs(s)>peak) peak=abs(s);
     }
     p += samples*2;
-    float db = (peak > 0) ? 20.0f * log10f(peak / 32767.0f) : -96.0f;
-    if (db > (voiced ? -38.0f : -32.0f)) { lastVoice = millis(); voiced = true; }
+
+    int zero_crossings = 0;
+    int last_sign = 0;
+    long long energy = 0;
+    for(int i=0; i<samples; i++) {
+        int16_t s = (g_mic_slot == MIC_SLOT_LEFT) ? dma[i*2] : dma[i*2+1];
+        int sign = (s > 0) ? 1 : ((s < 0) ? -1 : 0);
+        if (last_sign != 0 && sign != 0 && sign != last_sign) zero_crossings++;
+        last_sign = sign;
+        energy += s * s;
+    }
+
+    if (samples > 0) {
+        float avg_energy = energy / (float)samples;
+        float db = (peak > 0) ? 20.0f * log10f(peak / 32767.0f) : -96.0f;
+
+        if (db > (voiced ? -38.0f : -32.0f) && zero_crossings > 10 && avg_energy > 500) {
+            lastVoice = millis(); voiced = true;
+        }
+    }
     if (voiced && (millis()-lastVoice > 1000)) break; 
     if (!voiced && (millis()-start > 4000)) break; 
   }
@@ -546,12 +596,23 @@ void setupWiFi() {
 // =================================================================
 // CORE SETUP & LOOP
 // =================================================================
+void voiceTask(void* pvParameters) {
+  while(true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    String txt = recordAndTranscribe();
+    if(txt.length() > 1) {
+      speakText(askRick(txt));
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000); 
   Serial.println("\n\n[BOOT] --- MELVIN v4.0.7-BootFix ---");
 
   lcdMutex = xSemaphoreCreateMutex();
+  stateMutex = xSemaphoreCreateMutex();
   Serial.println("[BOOT] LCD Init...");
   lcd.init(); lcd.fillScreen(TFT_BLACK);
   
@@ -559,6 +620,8 @@ void setup() {
   // чтобы экран не висел черным во время настройки WiFi и SD.
   xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
   
+  xTaskCreatePinnedToCore(voiceTask, "voice", 16384, NULL, 2, &voiceTaskHandle, 1);
+
   pinMode(BOOT_BTN, INPUT_PULLUP);
   pinMode(PA_ENABLE, OUTPUT);
   digitalWrite(PA_ENABLE, LOW);
@@ -578,12 +641,13 @@ void setup() {
   Wire.setClock(100000);
   delay(50);
   
-  initES8311();
-  delay(50);
-
   audio = new Audio();
   audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
   audio->setVolume(12);
+  delay(100);
+
+  initES8311();
+  delay(50);
 
   setupWiFi();
   Serial.println("[SYSTEM] Ready.");
@@ -603,8 +667,7 @@ void loop() {
   if (btnPrev == HIGH && btnNow == LOW) { pressStart = millis(); longFired = false; }
   if (btnNow == LOW && !longFired && millis() - pressStart > 800) {
     longFired = true;
-    String txt = recordAndTranscribe();
-    if(txt.length()>1) speakText(askRick(txt));
+    xTaskNotifyGive(voiceTaskHandle);
   }
   btnPrev = btnNow;
   delay(10);
