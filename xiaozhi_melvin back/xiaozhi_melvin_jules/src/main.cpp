@@ -19,7 +19,13 @@
 #include "Audio.h"
 
 // =================================================================
-// MELVIN v4.0.2 - PROXY TUNNEL SUPPORT
+// MELVIN v4.0.8 - AUDIO MUTEX + GREETING FIX
+// Изменения vs v4.0.7:
+//   1. audioMutex — защищает объект Audio* от race condition между
+//      loop() (ядро 0) и speakText() внутри voiceTask (ядро 1)
+//   2. speakText() в setup() вынесен в one-shot FreeRTOS задачу —
+//      setup() больше не блокирует loop() на 3-5 сек при приветствии
+//   3. Версия обновлена до v4.0.8
 // =================================================================
 
 // --- GPIO PINS (STRICT MAPPING) ---
@@ -84,6 +90,9 @@ enum EmotionState { NEUTRAL, THINKING, HAPPY, NEWS, ERROR_STATE, LISTENING, SPEA
 volatile EmotionState currentEmotion = NEUTRAL;
 SemaphoreHandle_t lcdMutex;
 SemaphoreHandle_t stateMutex;
+// FIX #1: мьютекс для объекта Audio* — защищает от race condition
+// между audio->loop() в loop() (ядро 0) и speakText() в voiceTask (ядро 1)
+SemaphoreHandle_t audioMutex;
 TaskHandle_t animationTaskHandle;
 TaskHandle_t voiceTaskHandle;
 
@@ -144,8 +153,10 @@ static uint8_t es_read(uint8_t reg) {
 static void audio_release_i2s() {
     Serial.println("[AUDIO] Stopping RX/TX...");
     if (audio) {
+        xSemaphoreTake(audioMutex, portMAX_DELAY);
         audio->stopSong();
         audio->setPinout(I2S_BCLK_NUM, I2S_LRC_NUM, I2S_DOUT_NUM, I2S_MCLK_NUM);
+        xSemaphoreGive(audioMutex);
     }
     if (rx_handle) {
         i2s_channel_disable(rx_handle);
@@ -241,7 +252,7 @@ void initES8311() {
   es_write(0x37, 0x48);
   es_write(0x45, 0x00);
 
-  Serial.println("[CODEC] ES8311 Ready (v4.0.2 Map)");
+  Serial.println("[CODEC] ES8311 Ready (v4.0.8 Map)");
 }
 
 // =================================================================
@@ -376,9 +387,17 @@ void speakText(const String& text) {
       if (f) {
         http.writeToStream(&f); f.close();
         audio_enter_tx_mode();
+        // FIX #1: берём мьютекс перед любым обращением к audio объекту
+        xSemaphoreTake(audioMutex, portMAX_DELAY);
         audio->connecttoFS(SD_MMC, "/tts_out.flac");
-        while(audio->isRunning()) { audio->loop(); delay(1); }
+        while(audio->isRunning()) {
+          xSemaphoreGive(audioMutex);
+          audio->loop();
+          xSemaphoreTake(audioMutex, portMAX_DELAY);
+          delay(1);
+        }
         audio->stopSong();
+        xSemaphoreGive(audioMutex);
         played = true;
       }
     }
@@ -415,17 +434,29 @@ void speakText(const String& text) {
           f.close();
           gttsHttp.end();
           audio_enter_tx_mode();
+          // FIX #1: мьютекс для Google TTS воспроизведения
+          xSemaphoreTake(audioMutex, portMAX_DELAY);
           audio->connecttoFS(SD_MMC, "/tts_gtts.mp3");
+          xSemaphoreGive(audioMutex);
           unsigned long start = millis(), lastPosTime = millis();
           uint32_t lastPos = 0;
-          while(audio->isRunning() && (millis() - start < 15000)) {
+          while(millis() - start < 15000) {
+              xSemaphoreTake(audioMutex, portMAX_DELAY);
+              bool running = audio->isRunning();
+              xSemaphoreGive(audioMutex);
+              if (!running) break;
               audio->loop();
+              xSemaphoreTake(audioMutex, portMAX_DELAY);
               uint32_t currentPos = audio->getAudioCurrentTime();
+              xSemaphoreGive(audioMutex);
               if (currentPos != lastPos) { lastPos = currentPos; lastPosTime = millis(); }
               if (millis() - lastPosTime > 2000) { Serial.println("[AUDIO] SD TTS timeout!"); break; }
               delay(2);
           }
-          audio->stopSong(); played = true;
+          xSemaphoreTake(audioMutex, portMAX_DELAY);
+          audio->stopSong();
+          xSemaphoreGive(audioMutex);
+          played = true;
         } else { gttsHttp.end(); }
       } else { gttsHttp.end(); }
     } else { gttsHttp.end(); }
@@ -598,18 +629,28 @@ void voiceTask(void* pvParameters) {
   }
 }
 
+// FIX #2: приветствие как one-shot задача — setup() не блокируется
+static void greetingTask(void* pvParameters) {
+  // Ждём пока WiFi точно подключится (на случай медленного DHCP)
+  vTaskDelay(pdMS_TO_TICKS(500));
+  speakText("Рик снова в деле.");
+  vTaskDelete(NULL); // задача сама себя удаляет после выполнения
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000); 
-  Serial.println("\n\n[BOOT] --- MELVIN v4.0.7-BootFix ---");
+  Serial.println("\n\n[BOOT] --- MELVIN v4.0.8 ---");
 
-  lcdMutex = xSemaphoreCreateMutex();
+  lcdMutex  = xSemaphoreCreateMutex();
   stateMutex = xSemaphoreCreateMutex();
+  // FIX #1: создаём audioMutex
+  audioMutex = xSemaphoreCreateMutex();
+
   Serial.println("[BOOT] LCD Init...");
   lcd.init(); lcd.fillScreen(TFT_BLACK);
   
-  // КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Запускаем анимацию СРАЗУ, 
-  // чтобы экран не висел черным во время настройки WiFi и SD.
+  // Запускаем анимацию СРАЗУ — экран не висит чёрным
   xTaskCreatePinnedToCore(animationTask,"anim",8192,NULL,1,&animationTaskHandle,0);
   
   xTaskCreatePinnedToCore(voiceTask, "voice", 16384, NULL, 2, &voiceTaskHandle, 1);
@@ -644,12 +685,19 @@ void setup() {
   setupWiFi();
   Serial.println("[SYSTEM] Ready.");
   
-  // Приветствие в самом конце, чтобы не блокировать loop() при ошибках сети
-  speakText("Рик снова в деле.");
+  // FIX #2: приветствие в отдельной задаче — setup() завершается мгновенно,
+  // loop() начинает работать сразу, не ждёт 3-5 сек TTS запроса
+  xTaskCreate(greetingTask, "greet", 8192, NULL, 1, NULL);
 }
 
 void loop() {
-  if (audio) audio->loop();
+  // FIX #1: берём audioMutex перед audio->loop() чтобы не конфликтовать
+  // с speakText() из voiceTask на ядре 1
+  if (audio) {
+    xSemaphoreTake(audioMutex, portMAX_DELAY);
+    audio->loop();
+    xSemaphoreGive(audioMutex);
+  }
 
   static bool btnPrev = HIGH;
   static unsigned long pressStart = 0;
