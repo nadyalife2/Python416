@@ -32,9 +32,10 @@
 #define I2C_SCL       14
 #define PA_ENABLE     46
 
+// I2S pins - EXACT mapping from xiaozhi-esp32 SP-ESP32-S3-1.54-MUMA
 #define I2S_MCLK_PIN  GPIO_NUM_16
-#define I2S_BCLK_PIN  GPIO_NUM_9
-#define I2S_WS_PIN    GPIO_NUM_45
+#define I2S_BCLK_PIN  GPIO_NUM_9    // SCLK (was 41 - WRONG!)
+#define I2S_WS_PIN    GPIO_NUM_45   // LRCK (was 42 - CONFLICT with TFT_BL!)
 #define I2S_DIN_PIN   GPIO_NUM_10   // ES8311 -> ESP32 (Microphone)
 #define I2S_DOUT_PIN  GPIO_NUM_8    // ESP32 -> ES8311 (Speaker)
 
