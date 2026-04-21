@@ -1,1 +1,13 @@
 .pio
+.vscode
+build
+*.stackdump
+*.bak
+*.old
+sdkconfig.old
+sdkconfig.temp
+/sdkconfig
+!sdkconfig.defaults
+node_modules
+.DS_Store
+Thumbs.db
