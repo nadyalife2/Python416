@@ -44,6 +44,8 @@ uint32_t          animTick      = 0;
 uint32_t          lastRedrawMs  = 0;
 bool              sdReady       = false;
 bool              wifiConnected = false;
+bool              shouldReboot  = false; // Asynchronous reboot flag
+int               vad_processed_frames = 0; // VAD frame index tracker
 
 // ============================================================
 // ПИНЫ (SpotPear ESP32-S3-1.54 V2.0)
@@ -98,9 +100,9 @@ void initES8311() {
     es_write(0x07, 0x00);
     es_write(0x08, 0x40); // LRCK divider = 64
 
-    // 3. I2S Format
-    es_write(0x09, 0x00);
-    es_write(0x0A, 0x00);
+    // 3. I2S Format (Fix word length to 16-bit to match I2S)
+    es_write(0x09, 0x0C); // DAC format (16-bit)
+    es_write(0x0A, 0x0C); // ADC format (16-bit)
     
     // 4. Power & Analog
     es_write(0x0D, 0x01);
@@ -112,7 +114,7 @@ void initES8311() {
     // 5. ADC (Mic)
     es_write(0x13, 0x10);
     es_write(0x14, 0x1A);
-    es_write(0x1C, 0x6A); // Mic Gain
+    es_write(0x1C, 0x6A); // ADC HPF & EQ Bypass configuration (not Mic Gain)
 
     // 6. DAC & Output Routing (КРИТИЧНО - ИСПРАВЛЕНО ПО GEMINI.md)
     es_write(0x12, 0x00); // Unmute
@@ -172,10 +174,57 @@ void i2s_duplex_init() {
 }
 
 // ============================================================
+// WAV Header Parser (TASK-002)
+// Google TTS WAV может содержать LIST chunk перед data,
+// поэтому seek(44) — ненадёжен. Ищем "data" subchunk явно.
+// ============================================================
+static uint32_t wavFindDataOffset(File& file) {
+    char riff[4];
+    file.seek(0);
+    file.read((uint8_t*)riff, 4);
+    if (memcmp(riff, "RIFF", 4) != 0) {
+        Serial.println("[WAV] Not a RIFF file!");
+        return 0;
+    }
+    file.seek(8); // skip ChunkSize, jump to "WAVE"
+    char wave[4];
+    file.read((uint8_t*)wave, 4);
+    if (memcmp(wave, "WAVE", 4) != 0) {
+        Serial.println("[WAV] Not a WAVE file!");
+        return 0;
+    }
+    
+    uint32_t fileSize = file.size();
+    uint32_t pos = 12;
+    while (pos + 8 < fileSize) {
+        file.seek(pos);
+        char id[4];
+        file.read((uint8_t*)id, 4);
+        uint32_t chunkSize = 0;
+        file.read((uint8_t*)&chunkSize, 4);
+        if (memcmp(id, "data", 4) == 0) {
+            Serial.printf("[WAV] data chunk at offset %u, size %u bytes\n", pos + 8, chunkSize);
+            return pos + 8; // начало PCM данных
+        }
+        
+        // Prevent integer overflow and infinite loop
+        uint32_t nextPos = pos + 8 + chunkSize;
+        if (chunkSize & 1) nextPos++; // выравнивание на чётный байт
+        
+        if (nextPos <= pos || nextPos >= fileSize) {
+            Serial.println("[WAV] Malformed chunk size, aborting search!");
+            break;
+        }
+        pos = nextPos;
+    }
+    Serial.println("[WAV] data chunk not found! Falling back to offset 44.");
+    return 44;
+}
+
+// ============================================================
 // Manual WAV Player (Replacing Audio.h)
 // ============================================================
 bool playWavFromSD(const char* path) {
-    switchToTX();
     if (!sdReady) return false;
     File file = SD_MMC.open(path, FILE_READ);
     if (!file) {
@@ -183,37 +232,84 @@ bool playWavFromSD(const char* path) {
         return false;
     }
 
-    // Simple WAV header skip (44 bytes)
-    file.seek(44);
-
-    digitalWrite(PA_CTRL_PIN, HIGH);
-    delay(10);
+    uint32_t dataOffset = wavFindDataOffset(file);
+    if (dataOffset == 0) { file.close(); return false; }
+    file.seek(dataOffset);
+    Serial.printf("[WAV] Playing from offset %u, file size %u\n", dataOffset, (uint32_t)file.size());
 
     const size_t bufSize = 1024;
-    int16_t* wavBuf = (int16_t*)malloc(bufSize * 2); // Buffer for stereo expansion
+    // Optimized memory allocation (holds 512 stereo samples = 2048 bytes)
+    int16_t* wavBuf = (int16_t*)heap_caps_malloc(bufSize * 2, MALLOC_CAP_SPIRAM);
+    if (!wavBuf) {
+        Serial.println("[WAV] PSRAM alloc failed, trying heap...");
+        wavBuf = (int16_t*)malloc(bufSize * 2);
+    }
+    if (!wavBuf) {
+        file.close();
+        return false;
+    }
     uint8_t rawBuf[bufSize];
+
+    // Read the first block of data BEFORE turning on the amplifier
+    size_t firstRead = file.read(rawBuf, bufSize);
+    if (firstRead > 0) {
+        size_t samples = firstRead / 2;
+        int16_t* src = (int16_t*)rawBuf;
+        for (size_t i = 0; i < samples; i++) {
+            wavBuf[i*2]     = src[i];
+            wavBuf[i*2 + 1] = src[i];
+        }
+        
+        size_t written = 0;
+        i2s_channel_write(tx_handle, wavBuf, samples * 4, &written, portMAX_DELAY);
+        
+        // Turn ON the amplifier now that I2S transmission has started
+        digitalWrite(PA_CTRL_PIN, HIGH);
+        delay(10);
+    }
 
     while (file.available()) {
         size_t read = file.read(rawBuf, bufSize);
         if (read == 0) break;
 
-        // Expand Mono to Stereo if needed (assuming 16-bit mono WAV)
+        // Expand Mono→Stereo (16-bit samples)
         size_t samples = read / 2;
         int16_t* src = (int16_t*)rawBuf;
         for (size_t i = 0; i < samples; i++) {
-            wavBuf[i*2] = src[i];     // Left
+            wavBuf[i*2]     = src[i]; // Left
             wavBuf[i*2 + 1] = src[i]; // Right
         }
 
         size_t written = 0;
-        i2s_channel_write(tx_handle, wavBuf, samples * 4, &written, portMAX_DELAY);
+        esp_err_t err = i2s_channel_write(tx_handle, wavBuf, samples * 4, &written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[WAV] i2s_channel_write error: %d\n", err);
+        }
+
+        // --- Keep Rabbit Face Redraw Ticking ---
+        uint32_t now = millis();
+        if (now - lastRedrawMs >= REDRAW_MS) {
+            animTick++;
+            drawFace(canvas, currentState, animTick);
+            canvas.pushSprite(0, 0);
+            lastRedrawMs = now;
+        }
     }
 
     free(wavBuf);
     file.close();
-    
-    delay(50);
-    digitalWrite(PA_CTRL_PIN, LOW);
+
+    // DMA Drain Flush: Send 1024 samples of silence to flush the ring buffer before disabling PA
+    int16_t* silenceBuf = (int16_t*)calloc(bufSize * 2, sizeof(int16_t));
+    if (silenceBuf) {
+        size_t written = 0;
+        i2s_channel_write(tx_handle, silenceBuf, bufSize * 2 * sizeof(int16_t), &written, portMAX_DELAY);
+        free(silenceBuf);
+    } else {
+        delay(120); // Fallback delay to allow DMA to clear
+    }
+
+    digitalWrite(PA_CTRL_PIN, LOW); // Mute amplifier immediately
     return true;
 }
 
@@ -223,6 +319,18 @@ bool playWavFromSD(const char* path) {
 void setState(RobotState s) {
     if (currentState == s) return;
     Serial.printf("[FSM] %s → %s\n", stateName(currentState), stateName(s));
+    
+    // Centralized I2S Mode Switching (TASK-003)
+    if (s == STATE_IDLE || s == STATE_RECORDING) {
+        switchToRX();
+    } else {
+        switchToTX();
+    }
+
+    if (s == STATE_RECORDING) {
+        vad_processed_frames = 0; // Reset VAD processing frames on recording start
+    }
+
     currentState = s;
     drawFace(canvas, currentState, animTick);
     canvas.pushSprite(0, 0);
@@ -230,7 +338,7 @@ void setState(RobotState s) {
 }
 
 // ============================================================
-// Web Server & WiFi (Logic unchanged)
+// Web Server & WiFi
 // ============================================================
 void startWebServer() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
@@ -264,8 +372,7 @@ void startWebServer() {
                 configMgr.config.rss_url     = doc["rss_url"]     | configMgr.config.rss_url;
                 configMgr.save();
             }
-            delay(500);
-            ESP.restart();
+            shouldReboot = true; // Asynchronous safe reboot set
         }
     );
     server.begin();
@@ -353,8 +460,13 @@ void setup() {
     // 5. VAD Init
     vad_inst = vad_create(VAD_MODE_3);
 
-    // 6. Recorder & WiFi
-    recorder.begin();
+    // 6. Recorder (PSRAM allocation — 320KB)
+    if (!recorder.begin()) {
+        Serial.println("[SETUP] FATAL: Recorder PSRAM alloc failed! Check BOARD_HAS_PSRAM flag.");
+    }
+    
+    // Background auto-reconnection setup
+    WiFi.setAutoReconnect(true);
     connectWifi();
 }
 
@@ -369,6 +481,14 @@ void loop() {
     if (currentState == STATE_CONFIG_AP) dnsServer.processNextRequest();
 
     uint32_t now = millis();
+    
+    // Safely trigger asynchronous reboot outside WebServer thread
+    if (shouldReboot) {
+        Serial.println("[SYSTEM] Safe rebooting in 500ms...");
+        delay(500);
+        ESP.restart();
+    }
+
     if (now - lastRedrawMs >= REDRAW_MS) {
         animTick++;
         drawFace(canvas, currentState, animTick);
@@ -376,59 +496,80 @@ void loop() {
         lastRedrawMs = now;
     }
 
+    // --- Asynchronous Background WiFi Reconnect (non-blocking) ---
+    static uint32_t lastWifiCheckMs = 0;
+    if (currentState == STATE_IDLE && (now - lastWifiCheckMs > 15000)) {
+        lastWifiCheckMs = now;
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[WiFi] Connection lost! Waiting for background auto-reconnect...");
+            wifiConnected = false;
+        } else if (!wifiConnected) {
+            wifiConnected = true;
+            Serial.println("[WiFi] Reconnected successfully!");
+        }
+    }
+
     // --- Interaction Logic ---
     if (currentState == STATE_IDLE) {
-        // Ensure we are in RX mode for VAD
-        static bool wasIdle = false;
-        if (!wasIdle) {
-            switchToRX();
-            wasIdle = true;
-        }
+        static int16_t vad_buf[480]; // 30ms at 16kHz
+        static int vad_buf_idx = 0;
 
-        int16_t vad_buf[480]; // 30ms at 16kHz
+        int16_t temp_buf[64];
         size_t br = 0;
-        if (i2s_channel_read(rx_handle, vad_buf, sizeof(vad_buf), &br, 0) == ESP_OK && br > 0) {
-            if (vad_process(vad_inst, vad_buf, SAMPLE_RATE, 30) == VAD_SPEECH) {
-                Serial.println("[VAD] Speech detected!");
-                recorder.startRecording();
-                recStartMs = now;
-                silenceStartMs = now;
-                setState(STATE_RECORDING);
-                wasIdle = false; // reset for next time
+        
+        // Read with 5ms timeout to block slightly, avoiding stack garbage on partially filled buffers
+        if (i2s_channel_read(rx_handle, temp_buf, sizeof(temp_buf), &br, pdMS_TO_TICKS(5)) == ESP_OK && br > 0) {
+            int samples_read = br / 2;
+            for (int i = 0; i < samples_read; i++) {
+                vad_buf[vad_buf_idx++] = temp_buf[i];
+                if (vad_buf_idx >= 480) {
+                    if (vad_process(vad_inst, vad_buf, SAMPLE_RATE, 30) == VAD_SPEECH) {
+                        Serial.println("[VAD] Speech detected!");
+                        recorder.startRecording();
+                        recStartMs = now;
+                        silenceStartMs = now;
+                        setState(STATE_RECORDING);
+                    }
+                    vad_buf_idx = 0; // Clear index for next window
+                }
             }
         }
     }
 
     if (currentState == STATE_RECORDING) {
-        recorder.process();
+        bool buffer_full = recorder.process();
+        int current_frames = recorder.getFrameCount();
 
-        // Check for silence to stop recording
-        int16_t* latest_buf = recorder.getLatestFrame();
-        if (latest_buf && vad_process(vad_inst, latest_buf, SAMPLE_RATE, 30) == VAD_SILENCE) {
-            if (now - silenceStartMs > 1500) { // 1.5 seconds of silence
-                Serial.println("[VAD] Silence detected → stop");
-                String path = recorder.stopAndSave();
-                switchToTX();
-                
-                if (path.length() > 0 && wifiConnected) {
-                    setState(STATE_THINKING);
-                    String answer = agent.askAI(path, configMgr.config);
-                    setState(STATE_SPEAKING);
-                    tts.speak(answer, configMgr.config);
+        // Process VAD in contiguous 480-sample (30ms) steps without overlap (Issue 2)
+        int16_t* phrase_buf = recorder.getBuffer();
+        if (phrase_buf && (current_frames - vad_processed_frames >= 480)) {
+            int16_t* frame_ptr = &phrase_buf[vad_processed_frames];
+            if (vad_process(vad_inst, frame_ptr, SAMPLE_RATE, 30) == VAD_SILENCE) {
+                if (now - silenceStartMs > 1500) { // 1.5 seconds of silence
+                    Serial.println("[VAD] Silence detected → stop");
+                    String path = recorder.stopAndSave();
+                    
+                    if (path.length() > 0 && wifiConnected) {
+                        setState(STATE_THINKING);
+                        String answer = agent.askAI(path, configMgr.config);
+                        setState(STATE_SPEAKING);
+                        tts.speak(answer, configMgr.config);
+                    }
+                    setState(STATE_IDLE);
+                    return;
                 }
-                setState(STATE_IDLE);
-                return;
+            } else {
+                silenceStartMs = now; // Speech detected, reset silence timer
             }
-        } else {
-            silenceStartMs = now; // Speech detected, reset silence timer
+            vad_processed_frames += 480;
         }
 
         bool btnStop = (digitalRead(BOOT_BTN_PIN) == LOW); 
         bool timeout = (now - recStartMs > 10000);
         
-        if (btnStop || timeout) {
+        if (buffer_full || btnStop || timeout) {
+            Serial.printf("[REC] Stop recording: buffer_full=%d, btnStop=%d, timeout=%d\n", buffer_full, btnStop, timeout);
             String path = recorder.stopAndSave();
-            switchToTX();
             
             if (path.length() > 0 && wifiConnected) {
                 setState(STATE_THINKING);
