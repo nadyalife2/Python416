@@ -12,6 +12,7 @@ struct MelvinConfig {
     String gemini_keys;     
     String groq_keys;
     String openrouter_keys;
+    String yandex_keys;
     
     String llm_provider; 
     String tts_provider; 
@@ -21,14 +22,16 @@ struct MelvinConfig {
     String personality; // "rick", "calm", "podcast"
     String wake_word;    // e.g., "Мелвин"
     String system_prompt; // Custom prompt if none of the above
+    String api_proxy;    // Local API proxy to bypass geoblocking (e.g. "http://192.168.31.123:8080")
     
     MelvinConfig() {
-        llm_provider = "gemini";
-        tts_provider = "google";
+        llm_provider = "groq";    // Gemini геоблокирован в России, Groq работает
+        tts_provider = "none";    // Google TTS требует OAuth (не API ключ), используем WAV фразы
         tts_voice = "ru-RU-Wavenet-B";
         personality = "rick";
         wake_word = "Мелвин";
         rss_url = "https://lenta.ru/rss/news";
+        api_proxy = "http://192.168.31.123:8080";
     }
 
     String getEffectivePrompt() const {
@@ -63,26 +66,55 @@ public:
         config.gemini_keys = doc["gemini_keys"] | "";
         config.groq_keys = doc["groq_keys"] | "";
         config.openrouter_keys = doc["openrouter_keys"] | "";
-        config.llm_provider = doc["llm_provider"] | "gemini";
-        config.tts_provider = doc["tts_provider"] | "google";
+        config.yandex_keys = doc["yandex_keys"] | "";
+        config.llm_provider = doc["llm_provider"] | "groq";
+        config.tts_provider = doc["tts_provider"] | "none";
         config.tts_key = doc["tts_key"] | "";
         config.tts_voice = doc["tts_voice"] | "ru-RU-Wavenet-B";
         config.personality = doc["personality"] | "rick";
         config.wake_word = doc["wake_word"] | "Мелвин";
         config.rss_url = doc["rss_url"] | "https://lenta.ru/rss/news";
         config.system_prompt = doc["system_prompt"] | "";
+        
+        String proxy = doc["api_proxy"] | "http://192.168.31.123:8080";
+        proxy.trim();
+        if (proxy.endsWith("/")) {
+            proxy = proxy.substring(0, proxy.length() - 1);
+        }
+        config.api_proxy = proxy;
+        Serial.printf("[CONFIG] Loaded api_proxy from SD: '%s'\n", config.api_proxy.c_str());
+
+        // Auto-migrate: Gemini is geoblocked in Russia, Google TTS requires OAuth not API key
+        if (config.llm_provider == "gemini") {
+            Serial.println("[CONFIG] Auto-migrating llm_provider: gemini -> groq (geoblocked)");
+            config.llm_provider = (config.groq_keys.length() > 5) ? "groq" :
+                                  (config.openrouter_keys.length() > 5) ? "openrouter" : "groq";
+        }
+        if (config.tts_provider == "google") {
+            Serial.println("[CONFIG] Auto-migrating tts_provider: google -> none (requires OAuth)");
+            config.tts_provider = "none";
+        }
         return true;
     }
 
     bool save() {
         File file = SD_MMC.open("/config.json", FILE_WRITE);
         if (!file) return false;
+
+        String proxy = config.api_proxy;
+        proxy.trim();
+        if (proxy.endsWith("/")) {
+            proxy = proxy.substring(0, proxy.length() - 1);
+        }
+        config.api_proxy = proxy;
+
         JsonDocument doc;
         doc["wifi_ssid"] = config.wifi_ssid;
         doc["wifi_pass"] = config.wifi_pass;
         doc["gemini_keys"] = config.gemini_keys;
         doc["groq_keys"] = config.groq_keys;
         doc["openrouter_keys"] = config.openrouter_keys;
+        doc["yandex_keys"] = config.yandex_keys;
         doc["llm_provider"] = config.llm_provider;
         doc["tts_provider"] = config.tts_provider;
         doc["tts_key"] = config.tts_key;
@@ -91,6 +123,7 @@ public:
         doc["wake_word"] = config.wake_word;
         doc["rss_url"] = config.rss_url;
         doc["system_prompt"] = config.system_prompt;
+        doc["api_proxy"] = config.api_proxy;
         serializeJson(doc, file);
         file.close();
         return true;

@@ -1,295 +1,352 @@
-# Melvin AI Assistant - Audio Hardware & Low-Level Code Review
+# Отчёт: Audio Hardware & ES8311 — Melvin (SpotPear ESP32-S3 V2.0)
 
-This report provides a detailed technical review of the low-level audio driver, codec configuration, and hardware control logic implemented in the Melvin project. The primary focus is on correctness, safety, efficiency, and compliance with the hardware constraints defined in [AGENTS.md](file:///d:/xiaoshi/say-ya/python416/AGENTS.md) and [GEMINI.md](file:///d:/xiaoshi/say-ya/python416/GEMINI.md).
-
----
-
-## 1. Executive Summary
-
-A comprehensive review of [src/main.cpp](file:///d:/xiaoshi/say-ya/python416/src/main.cpp) and [include/Recorder.h](file:///d:/xiaoshi/say-ya/python416/include/Recorder.h) reveals that the project successfully implements raw I2S configuration using ESP-IDF v5 APIs (`driver/i2s_std.h`), successfully avoiding the problematic `ESP32-audioI2S` library.
-
-However, several hardware issues, code inaccuracies, and inefficiencies were identified:
-1. **I2S Format Mismatch:** The ES8311 codec is currently configured in 24-bit mode via registers `0x09`/`0x0A`, while the ESP32 I2S controller transmits in 16-bit mode, leading to data misalignment and potential audio degradation.
-2. **Audio Glitches and Pops:** The power amplifier control pin (`PA_CTRL`) is enabled before allocating buffers and reading files from the SD card. This introduces a delay during which the amplifier is on but the I2S lines are idle, causing audible pops.
-3. **Tail-End Audio Cutoff:** The fixed 50ms delay before turning off the amplifier is insufficient to allow the I2S DMA transmit buffer to drain fully, resulting in the cutting off of the last syllable/word.
-4. **MCLK Instability:** Disabling I2S channels during RX/TX switching halts the Master Clock (MCLK) while the codec is active, which can cause internal PLL lock issues or clicks in the codec.
-5. **Parser Security Vulnerability:** The custom WAV header parser (`wavFindDataOffset`) lacks protection against integer overflow, which could lead to infinite loops or out-of-bounds seeking when processing malformed/corrupted files.
+> **Дата:** 2026-06-05  
+> **Аналитик:** ESP-IDF Audio Hardware & ES8311 Expert  
+> **Файлы:** `src/main.cpp` (627 строк), `include/Recorder.h` (194 строки)
 
 ---
 
-## 2. Current Implementation Analysis
+## Executive Summary
 
-### A. ES8311 Codec Initialization ([src/main.cpp:L84-L128](file:///d:/xiaoshi/say-ya/python416/src/main.cpp#L84-L128))
-The `initES8311()` function configures the ES8311 registers over I2C:
-* **Reset and Clocking:** Properly resets the chip using register `0x00`, configures the MCLK divider to `0x3F` (Register `0x01`), and BCLK/LRCK ratios.
-* **Volume & Gain:** Follows the [GEMINI.md](file:///d:/xiaoshi/say-ya/python416/GEMINI.md) specification:
-  * Register `0x32 = 0xBF` (Analog volume max).
-  * Register `0x37 = 0x08` (DAC routed to output mixer).
-  * Register `0x45 = 0x22` (Output driver gain set to maximum safe level).
-* **ADC / Microphone:** Selects the input path and sets the programmable gain amplifier (PGA).
-
-### B. Raw I2S Config & Duplex Mode ([src/main.cpp:L133-L172](file:///d:/xiaoshi/say-ya/python416/src/main.cpp#L133-L172))
-The ESP32 I2S controller is configured using the ESP-IDF standard mode driver:
-* Shared clock architecture: TX is configured as stereo (required by the ES8311 DAC), and RX is mono (for the MB23 H11W microphone).
-* **MCLK Startup:** Properly starts the TX channel (`tx_handle`) at boot-time before initializing I2C communication. This stabilizes the Master Clock (GPIO16) before the codec starts registers initialization.
-
-### C. Power Amplifier Control (`PA_CTRL` Pin) ([src/main.cpp:L385-L386](file:///d:/xiaoshi/say-ya/python416/src/main.cpp#L385-L386))
-* The NS4150B amplifier is controlled via GPIO46 (`PA_CTRL_PIN`).
-* GPIO46 is a strapping pin. The code properly sets the pin to `OUTPUT` and drives it `LOW` at the very beginning of `setup()`.
-* In `playWavFromSD()`, the pin is driven `HIGH` during playback and set back to `LOW` after completion.
-
-### D. WAV Header Parsing (`wavFindDataOffset`) ([src/main.cpp:L179-L212](file:///d:/xiaoshi/say-ya/python416/src/main.cpp#L179-L212))
-* Scans the chunks of the WAV file to dynamically find the `"data"` subchunk offset instead of assuming a hardcoded 44 bytes. This successfully accommodates Google TTS responses, which often contain `LIST` chunks.
+Код в целом построен корректно и демонстрирует хорошее понимание аппаратных требований платы SpotPear ESP32-S3 V2.0. Основные решения — continuous full-duplex I2S, правильная последовательность MCLK→initES8311, chunked WAV-запись в PSRAM — реализованы верно. Тем не менее выявлено **3 проблемы уровня HIGH**, **4 проблемы уровня MEDIUM** и **3 наблюдения уровня LOW**, способных приводить к артефактам звука, потере данных или нестабильной работе.
 
 ---
 
-## 3. Potential Issues & Inefficiencies
+## 1. Проверка инициализации I2S и ES8311
 
-### Issue 1: ES8311 24-Bit Format vs. I2S 16-Bit Format (Crucial Bug)
-In `initES8311()`, the registers `0x09` (DAC format) and `0x0A` (ADC format) are initialized to `0x00`:
-```cpp
-// 3. I2S Format
-es_write(0x09, 0x00);
-es_write(0x0A, 0x00);
+### 1.1 Порядок инициализации в `setup()`
+
 ```
-According to the ES8311 datasheet, bits `4:2` (`SDP_IN_WL` / `SDP_OUT_WL`) being `000` corresponds to **24-bit word length** (default).
-However, the I2S config in `i2s_duplex_init()` sets the data bit width to 16 bits (`I2S_DATA_BIT_WIDTH_16BIT`). 
-* **Impact:** The codec expects 24-bit cycles per sample, but receives only 16-bit cycles. This word-length format mismatch can cause misalignment of audio samples, resulting in digital distortion, white noise, or severe volume reduction.
-* **Fix:** Change registers `0x09` and `0x0A` to `0x0C` (which sets bits `4:2` to `011`, corresponding to 16-bit word length).
-
-### Issue 2: Wrong Comments regarding Mic Gain
-In `initES8311()` line 115:
-```cpp
-es_write(0x1C, 0x6A); // Mic Gain
+i2s_duplex_init()   → MCLK GPIO16 стартует  ✅
+delay(200)          → ожидание стабилизации  ✅
+Wire.begin()
+initES8311()        → I2C инит ПОСЛЕ MCLK    ✅
 ```
-* **Impact:** Register `0x1C` controls the ADC High-Pass Filter (HPF) and Equalizer bypass settings, not the mic gain. The programmable gain amplifier (PGA) is actually configured via Register `0x14` (which is written with `0x1A`, assigning the maximum gain of +30dB). The comment is misleading.
-* **Fix:** Correct the comment to `// ADC HPF and EQ Bypass configuration`.
 
-### Issue 3: Premature `PA_CTRL` Pin Activation (Audio Pop)
-In `playWavFromSD()`, the amplifier control is structured as:
+**Вывод:** Порядок правильный. MCLK гарантированно активен до первого I2C-обращения к ES8311.
+
+### 1.2 I2S duplex конфигурация
+
+| Параметр | TX | RX | Ожидаемое |
+|---|---|---|---|
+| Sample Rate | 16000 | 16000 | 16000 ✅ |
+| Bit Width | 16-bit | 16-bit | 16-bit ✅ |
+| Slot Mode | STEREO | MONO | Stereo TX / Mono RX ✅ |
+| MCLK Multiple | 256 | 256 | 256 ✅ |
+| MCLK Pin | GPIO16 | GPIO16 | GPIO16 ✅ |
+| BCLK Pin | GPIO9 | GPIO9 | GPIO9 ✅ |
+| WS Pin | GPIO45 | GPIO45 | GPIO45 ✅ |
+| DOUT | GPIO8 | UNUSED | ✅ |
+| DIN | UNUSED | GPIO10 | ✅ |
+
+**Вывод:** Конфигурация пинов и параметров I2S соответствует схемотехнике SpotPear V2.0.
+
+---
+
+## 2. Проверка регистров ES8311
+
+### 2.1 Таблица регистров
+
+| Регистр | Значение | Назначение | Статус |
+|---|---|---|---|
+| `0x00` | `0x1F` → `0x00` → `0x80` | Reset → Normal → Master Start | ✅ |
+| `0x01` | `0x3F` | MCLK divider | ✅ Соответствует требованию |
+| `0x08` | `0xFF` | LRCK divider | ⚠️ ПРОБЛЕМА — см. HIGH-001 |
+| `0x09` | `0x0C` | DAC I2S format — 16-bit Philips | ✅ |
+| `0x0A` | `0x0C` | ADC I2S format — 16-bit Philips | ✅ |
+| `0x17` | `0xCF` | ADC Digital Volume (+8dB, unmute) | ✅ |
+| `0x32` | `0xBF` | DAC Digital Volume MAX | ✅ Соответствует требованию |
+| `0x37` | `0x08` | Route DAC → output | ✅ Соответствует требованию |
+| `0x45` | `0x22` | Driver Gain | ✅ Соответствует требованию |
+| `0x12` | `0x00` | Unmute DAC | ✅ |
+
+### 2.2 Детальный анализ Reg 0x08
+
+**Значение `0xFF` (255 decimal).**  
+В ES8311 регистр `0x08` задаёт LRCK (WS) делитель: `LRCK_DIV = 0x08[7:0] + 1 = 256`.  
+При MCLK = 16000 × 256 = 4 096 000 Гц → LRCK = MCLK / 256 = 16 000 Гц. Математически корректно.  
+Однако в ES8311 биты 7:0 регистра `0x08` содержат **LRCK_H[7:0]** (старший байт 11-битного делителя), а **LRCK_L[7:0]** — в регистре `0x07`.  
+Итоговый делитель = `{0x08[2:0], 0x07[7:0]}` = `{0x07[2:0], 0xFF}` при `0x07=0x00` → `{0b000, 0xFF}` = **255**.  
+LRCK = MCLK / 256 = 16 000 Гц — **совпадает**. Значение верное.
+
+---
+
+## 3. Проверка PA_CTRL (GPIO46)
+
+### Схема управления в коде:
+
+```
+setup():
+    pinMode(PA_CTRL_PIN, OUTPUT)
+    digitalWrite(PA_CTRL_PIN, LOW)     ← LOW при boot ✅
+
+playWavFromSD():
+    [1] switchToTX()
+    [2] file.read → rawBuf
+    [3] i2s_channel_write(...)          ← первый write ДО HIGH ✅
+    [4] digitalWrite(PA_CTRL_PIN, HIGH) ← HIGH после начала передачи ✅
+    [5] ... playback loop ...
+    [6] flush silence buf
+    [7] digitalWrite(PA_CTRL_PIN, LOW)  ← LOW после завершения ✅
+```
+
+**Вывод:** Логика PA_CTRL соответствует требованию: LOW при boot, HIGH только во время воспроизведения, LOW после. ✅
+
+> [!NOTE]
+> GPIO46 — strapping pin. На плате SpotPear V2.0 он подтянут к GND через NS4150B.  
+> `pinMode(OUTPUT)` + `digitalWrite(LOW)` в `setup()` корректны и не конфликтуют с boot ROM.
+
+---
+
+## 4. Найденные проблемы
+
+---
+
+### 🔴 HIGH-001: Гонка данных в `getPeakLevel()` — двойной I2S read
+
+**Файл:** `Recorder.h`, строки 83–97  
+**Описание:**  
+`getPeakLevel()` вызывает `i2s_channel_read()` независимо от `process()`. Если обе функции вызываются в одном цикле loop, один и тот же I2S RX DMA-буфер будет прочитан **дважды**, часть данных будет потеряна для записи. В режиме непрерывной записи это приведёт к пропускам в PCM-данных.
+
+**Текущий код:**
 ```cpp
-digitalWrite(PA_CTRL_PIN, HIGH);
-delay(10);
+// Recorder.h:88
+if (i2s_channel_read(rx_handle, dma_buf, sizeof(dma_buf),
+                     &br, pdMS_TO_TICKS(5)) == ESP_OK && br > 0) {
+```
 
+**Исправление:**
+```cpp
+float getPeakLevel() {
+    // Вычисляем peak по уже записанным данным в phrase_buf,
+    // а НЕ делаем дополнительный read из I2S
+    if (!phrase_buf || phrase_frames == 0) return 0.0f;
+    int start = (phrase_frames > 128) ? phrase_frames - 128 : 0;
+    float max_val = 0;
+    for (int i = start; i < phrase_frames; i++) {
+        float val = fabsf((float)phrase_buf[i]);
+        if (val > max_val) max_val = val;
+    }
+    return max_val / 32768.0f;
+}
+```
+
+---
+
+### 🔴 HIGH-002: Stack overflow риск — `uint8_t rawBuf[bufSize]` на стеке задачи
+
+**Файл:** `main.cpp`, строка 255  
+**Описание:**  
+`bufSize = 1024`, `rawBuf[1024]` выделяется на **стеке** внутри `playWavFromSD()`. Стек задачи Arduino на ESP-IDF по умолчанию — 8192 байт. С учётом вложенных вызовов (File, SD_MMC, I2S) буфер в 1 КБ на стеке создаёт высокий риск stack overflow, особенно если вызов идёт из глубокого контекста.
+
+**Текущий код:**
+```cpp
 const size_t bufSize = 1024;
-int16_t* wavBuf = (int16_t*)heap_caps_malloc(bufSize * 4, MALLOC_CAP_SPIRAM);
-// ...
-while (file.available()) {
-    size_t read = file.read(rawBuf, bufSize);
-    // ... mono to stereo expansion
-    i2s_channel_write(tx_handle, wavBuf, samples * 4, &written, portMAX_DELAY);
-}
+uint8_t rawBuf[bufSize];  // ← стек!
 ```
-* **Impact:** The amplifier is powered ON before `wavBuf` is allocated in PSRAM, and before the first chunk is read from the SD card. These filesystem and allocation calls take a variable amount of milliseconds. Because the amplifier turns on while the I2S lines are idle, a prominent click or pop is heard through the speaker.
-* **Fix:** Allocate the buffer, open the file, and read the first block of data *before* driving `PA_CTRL_PIN` `HIGH`.
 
-### Issue 4: Tail-End Audio Cutoff
-At the end of `playWavFromSD()`:
+**Исправление:**
 ```cpp
+const size_t bufSize = 1024;
+// Выделяем rawBuf в PSRAM вместе с wavBuf
+uint8_t* rawBuf = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_SPIRAM);
+if (!rawBuf) rawBuf = (uint8_t*)malloc(bufSize);
+if (!rawBuf) { free(wavBuf); file.close(); return false; }
+
+// ... (в конце функции)
+free(rawBuf);
 free(wavBuf);
-file.close();
-
-delay(50);
-digitalWrite(PA_CTRL_PIN, LOW);
 ```
-* **Impact:** `i2s_channel_write()` with `portMAX_DELAY` returns as soon as the last chunk is pushed into the I2S DMA ring buffer, *not* when the speaker finishes playing it. The DMA buffer might hold up to 128ms of audio. Turning off the amplifier (`PA_CTRL_PIN` = `LOW`) after only 50ms cuts off the end of the audio playback (last syllable of words) and creates a closing click.
-* **Fix:** Calculate the required flush delay based on the I2S configuration, or push a small buffer of silence (zeros) through I2S to flush the DMA queue before turning off the amplifier.
 
-### Issue 5: MCLK Cessation during Duplex Transition
-In [src/main.cpp:L367-L378](file:///d:/xiaoshi/say-ya/python416/src/main.cpp#L367-L378):
+---
+
+### 🔴 HIGH-003: Потенциальный PA_CTRL HIGH при пустом файле
+
+**Файл:** `main.cpp`, строки 258–273  
+**Описание:**  
+Если `firstRead > 0` но `i2s_channel_write` возвращает ошибку (таймаут, закрытый канал), `PA_CTRL` всё равно переходит в `HIGH` (строка 271). При последующем закрытии файла (строка 304) `PA_CTRL` будет снят только в строке 316, но DMA уже мог не запуститься — усилитель будет включён без сигнала, что даёт характерный щелчок/шум.
+
+**Текущий код:**
 ```cpp
-void switchToRX() {
-    i2s_channel_disable(tx_handle);
+i2s_channel_write(tx_handle, wavBuf, samples * 4, &written, portMAX_DELAY);
+
+// Turn ON the amplifier now that I2S transmission has started
+digitalWrite(PA_CTRL_PIN, HIGH);
+```
+
+**Исправление:**
+```cpp
+esp_err_t err = i2s_channel_write(tx_handle, wavBuf, samples * 4, &written, portMAX_DELAY);
+if (err == ESP_OK && written > 0) {
+    digitalWrite(PA_CTRL_PIN, HIGH);
     delay(10);
-    i2s_channel_enable(rx_handle);
-}
-```
-* **Impact:** Disabling `tx_handle` shuts down the clock generator, stopping the MCLK output on GPIO16. The ES8311 relies on MCLK for its digital filters and internal states. Removing MCLK while the codec is active causes it to enter an unstable state, leading to audio pops when switching between states (e.g. going from Speaking to Recording).
-* **Fix:** Keep the TX channel enabled constantly (since it acts as the master clock source) and use mute registers in the ES8311 or the PA_CTRL pin to control direction, or ensure the codec is properly prepared (e.g., muted) before the clock is stopped.
-
-### Issue 6: Integer Overflow and Infinite Loop in `wavFindDataOffset`
-In `wavFindDataOffset()`:
-```cpp
-pos += 8 + chunkSize;
-if (chunkSize & 1) pos++;
-```
-* **Impact:** If `chunkSize` is corrupt or malformed (e.g. `0xFFFFFFFF`), adding it to `pos` will overflow the `uint32_t` variable. The loop condition `pos + 8 < file.size()` will continue to evaluate to `true` (since `pos` wrapped around to a small number), trapping the execution in an infinite seek loop or causing unexpected seek errors.
-* **Fix:** Add bounds checking to ensure `pos + 8 + chunkSize` does not exceed `file.size()` and does not cause an integer overflow.
-
----
-
-## 4. Proposed Fixes & Code Implementations
-
-Below are the recommended refactored code blocks to resolve the identified hardware issues.
-
-### Refactoring `initES8311` (Fixes 16-bit format & comments)
-```diff
-     // 3. I2S Format
--    es_write(0x09, 0x00);
--    es_write(0x0A, 0x00);
-+    es_write(0x09, 0x0C); // Set word length to 16-bit (DAC input)
-+    es_write(0x0A, 0x0C); // Set word length to 16-bit (ADC output)
-     
-     // 4. Power & Analog
-     es_write(0x0D, 0x01);
-     es_write(0x0E, 0x02);
-     es_write(0x0F, 0x7F);
-     es_write(0x10, 0x00);
-     es_write(0x11, 0x7C);
- 
-     // 5. ADC (Mic)
-     es_write(0x13, 0x10);
-     es_write(0x14, 0x1A);
--    es_write(0x1C, 0x6A); // Mic Gain
-+    es_write(0x1C, 0x6A); // ADC HPF & EQ Bypass Config (not Mic Gain)
-```
-
-### Refactoring `playWavFromSD` (Fixes click prevention & audio cutoff)
-```cpp
-bool playWavFromSD(const char* path) {
-    switchToTX();
-    if (!sdReady) return false;
-    File file = SD_MMC.open(path, FILE_READ);
-    if (!file) {
-        Serial.printf("[WAV] File not found: %s\n", path);
-        return false;
-    }
-
-    uint32_t dataOffset = wavFindDataOffset(file);
-    if (dataOffset == 0) { file.close(); return false; }
-    file.seek(dataOffset);
-    Serial.printf("[WAV] Playing from offset %u, file size %u\n", dataOffset, (uint32_t)file.size());
-
-    const size_t bufSize = 1024;
-    // Pre-allocate buffer in PSRAM BEFORE turning on the amplifier
-    int16_t* wavBuf = (int16_t*)heap_caps_malloc(bufSize * 4, MALLOC_CAP_SPIRAM);
-    if (!wavBuf) {
-        Serial.println("[WAV] PSRAM alloc failed, trying heap...");
-        wavBuf = (int16_t*)malloc(bufSize * 4);
-    }
-    if (!wavBuf) {
-        file.close();
-        return false;
-    }
-
-    uint8_t rawBuf[bufSize];
-    
-    // Read the first block of data BEFORE turning on the amplifier
-    size_t firstRead = file.read(rawBuf, bufSize);
-    if (firstRead > 0) {
-        size_t samples = firstRead / 2;
-        int16_t* src = (int16_t*)rawBuf;
-        for (size_t i = 0; i < samples; i++) {
-            wavBuf[i*2]     = src[i];
-            wavBuf[i*2 + 1] = src[i];
-        }
-        
-        // Write first buffer to DMA queue to prepare I2S signals
-        size_t written = 0;
-        i2s_channel_write(tx_handle, wavBuf, samples * 4, &written, portMAX_DELAY);
-        
-        // Turn ON the amplifier now that I2S transmission has started
-        digitalWrite(PA_CTRL_PIN, HIGH);
-        delay(10); // Wait for PA startup transient to settle
-    }
-
-    // Play remaining data
-    while (file.available()) {
-        size_t read = file.read(rawBuf, bufSize);
-        if (read == 0) break;
-
-        size_t samples = read / 2;
-        int16_t* src = (int16_t*)rawBuf;
-        for (size_t i = 0; i < samples; i++) {
-            wavBuf[i*2]     = src[i]; // Left
-            wavBuf[i*2 + 1] = src[i]; // Right
-        }
-
-        size_t written = 0;
-        esp_err_t err = i2s_channel_write(tx_handle, wavBuf, samples * 4, &written, portMAX_DELAY);
-        if (err != ESP_OK) {
-            Serial.printf("[WAV] i2s_channel_write error: %d\n", err);
-        }
-    }
-
-    free(wavBuf);
-    file.close();
-
-    // DMA Drain Flush: Send 1024 samples of silence to flush the ring buffer before disabling PA
-    int16_t* silenceBuf = (int16_t*)calloc(bufSize * 2, sizeof(int16_t));
-    if (silenceBuf) {
-        size_t written = 0;
-        i2s_channel_write(tx_handle, silenceBuf, bufSize * 2 * sizeof(int16_t), &written, portMAX_DELAY);
-        free(silenceBuf);
-    } else {
-        delay(120); // Fallback delay to allow DMA to clear
-    }
-
-    digitalWrite(PA_CTRL_PIN, LOW); // Mute amplifier immediately after playback ends
-    return true;
-}
-```
-
-### Refactoring `wavFindDataOffset` (Fixes overflow and file limit checks)
-```cpp
-static uint32_t wavFindDataOffset(File& file) {
-    char riff[4];
-    file.seek(0);
-    file.read((uint8_t*)riff, 4);
-    if (memcmp(riff, "RIFF", 4) != 0) {
-        Serial.println("[WAV] Not a RIFF file!");
-        return 0;
-    }
-    file.seek(8);
-    char wave[4];
-    file.read((uint8_t*)wave, 4);
-    if (memcmp(wave, "WAVE", 4) != 0) {
-        Serial.println("[WAV] Not a WAVE file!");
-        return 0;
-    }
-    
-    uint32_t fileSize = file.size();
-    uint32_t pos = 12;
-    while (pos + 8 < fileSize) {
-        file.seek(pos);
-        char id[4];
-        file.read((uint8_t*)id, 4);
-        uint32_t chunkSize = 0;
-        file.read((uint8_t*)&chunkSize, 4);
-        
-        if (memcmp(id, "data", 4) == 0) {
-            Serial.printf("[WAV] data chunk at offset %u, size %u bytes\n", pos + 8, chunkSize);
-            return pos + 8;
-        }
-        
-        // Prevent integer overflow and infinite loop
-        uint32_t nextPos = pos + 8 + chunkSize;
-        if (chunkSize & 1) nextPos++;
-        
-        if (nextPos <= pos || nextPos >= fileSize) {
-            Serial.println("[WAV] Malformed chunk size, aborting search!");
-            break;
-        }
-        pos = nextPos;
-    }
-    Serial.println("[WAV] data chunk not found! Falling back to offset 44.");
-    return 44;
+} else {
+    Serial.printf("[WAV] First write failed: %d, written=%d\n", err, written);
+    // PA остаётся LOW — нет щелчка
 }
 ```
 
 ---
 
-## 5. Compliance Matrix (Rules in `AGENTS.md` and `GEMINI.md`)
+### 🟡 MEDIUM-001: RX I2S channel использует `MONO`, но ES8311 передаёт стерео-фрейм
 
-| Constraint Source | Rule Description | Compliance Status | Analysis & Comments |
-| :--- | :--- | :--- | :--- |
-| **AGENTS.md** | `PA_CTRL` (GPIO46) is a strapping pin. Must boot in `LOW` state. | **Compliant** | Done correctly in `setup()`. |
-| **AGENTS.md** | Turn ON (`HIGH`) `PA_CTRL` only immediately before I2S TX starts. | **Semi-Compliant** | Currently enabled before buffer allocation/file reading. The proposed fix fully aligns it. |
-| **AGENTS.md** | Turn OFF (`LOW`) `PA_CTRL` immediately after playback to avoid white noise. | **Compliant** | Done correctly, but delayed by an arbitrary 50ms. The proposed fix introduces a DMA flush to avoid truncation. |
-| **AGENTS.md** | MCLK (GPIO16) must be stabilized before ES8311 I2C registers init. | **Compliant** | Done correctly by starting I2S TX mode before writing registers. |
-| **AGENTS.md** | I2S switching `disable(RX) -> delay(10) -> enable(TX)` pattern. | **Compliant** | Implemented, but raises a concern regarding stopping MCLK while the codec is active. |
-| **AGENTS.md** | Strictly FAT32 SD card format in 1-bit mode. | **Compliant** | Properly matches `SD_MMC.begin("/sdcard", true)` and configured pins. |
-| **AGENTS.md** | Audio Format: WAV/PCM, 16kHz, 16-bit, Mono. | **Compliant** | Project matches standard. Mono files are properly expanded to stereo for the ES8311 DAC. |
-| **AGENTS.md** | No `delay()` inside audio streaming or callbacks. | **Compliant** | Checked. Delays only occur in initialization and the main loop. |
-| **AGENTS.md** | PSRAM utilization for audio buffers. | **Compliant** | Checked. `phrase_buf` and `wavBuf` allocate from `MALLOC_CAP_SPIRAM`. |
-| **GEMINI.md** | Register settings: `0x01=0x3F`, `0x32=0xBF`, `0x37=0x08`, `0x45=0x22`. | **Compliant** | These values are used exactly in `initES8311()`. |
+**Файл:** `main.cpp`, строка 162  
+**Описание:**  
+ES8311 как I2S Slave передаёт данные АЦП в обоих слотах (L+R) стерео-фрейма, даже если микрофон физически один (MEMS моно). При `I2S_SLOT_MODE_MONO` ESP-IDF I2S RX driver захватывает **только левый слот**. Это означает, что если ES8311 помещает ADC-данные в правый слот (зависит от настройки регистра `0x0A`), запись окажется тишиной.
+
+**Рекомендация:**  
+Проверить регистр `0x0A` (ADC format). Бит `[3]` = `ADC_LEFT_MUTE` / `ADC_RIGHT_MUTE` определяет, какой слот активен. Для надёжности переключить RX на `STEREO` и брать только левый канал в `process()`:
+
+```cpp
+// i2s_duplex_init(): изменить RX на STEREO
+.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+    I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+
+// Recorder.h process(): брать только чётные сэмплы (левый канал)
+int n = br / 2; // теперь n = stereo пар
+for (int i = 0; i < n && phrase_frames < REC_PHRASE_MAX; i += 2) {
+    phrase_buf[phrase_frames++] = dma_buf[i]; // только L
+}
+```
+
+---
+
+### 🟡 MEDIUM-002: `silenceBuf` на куче (calloc) при flush — не PSRAM
+
+**Файл:** `main.cpp`, строки 307–314  
+**Описание:**  
+`calloc(bufSize * 2, sizeof(int16_t))` = `calloc(2048, 2)` = 4096 байт — выделяется из внутренней heap. При фрагментированной памяти после большой сессии это может вернуть `nullptr`. Код это обрабатывает через `delay(120)`, но именно тогда, когда DMA flush критичен, можно получить щелчок.
+
+**Исправление:**
+```cpp
+// Вместо calloc — статический нулевой буфер или выделение в PSRAM:
+static const int16_t silence_buf[1024] = {0}; // ROM-секция, 0 байт SRAM
+size_t written = 0;
+// flush несколькими маленькими блоками чтобы не залочить DMA надолго
+for (int k = 0; k < 2; k++) {
+    i2s_channel_write(tx_handle, silence_buf, sizeof(silence_buf), &written, pdMS_TO_TICKS(50));
+}
+```
+
+---
+
+### 🟡 MEDIUM-003: `delay(5)` в `loop()` — лишняя задержка при VAD
+
+**Файл:** `main.cpp`, строка 625  
+**Описание:**  
+`delay(5)` в конце `loop()` означает, что I2S RX буфер не опрашивается 5 мс каждый цикл. При 16 кГц / 256 фреймов/DMA-буфер = 16 мс заполнение буфера. С 5 мс задержкой + временем выполнения loop ~2–3 мс существует риск переполнения DMA FIFO и потери сэмплов.
+
+**Рекомендация:**  
+Убрать `delay(5)`. Если требуется отдача CPU другим задачам, заменить на `vTaskDelay(1)` (1 тик = 1 мс в FreeRTOS):
+```cpp
+// Строка 625:
+// delay(5);       ← убрать
+taskYIELD();       // позволить другим задачам выполниться без фиксированного delay
+```
+
+---
+
+### 🟡 MEDIUM-004: `rec_counter` сбрасывается после 10 — перезапись активного файла
+
+**Файл:** `Recorder.h`, строки 116–118  
+**Описание:**  
+`rec_counter = (rec_counter + 1) % 10` цикличен. Если `Agent.h` медленно читает `/rec_009.wav` через SD, а следующая запись начнётся в тот же файл — данные будут повреждены. Счётчик не синхронизирован с завершением чтения агентом.
+
+**Рекомендация:**  
+Не делать циклический сброс, либо проверять занятость файла:
+```cpp
+// Вариант 1: монотонный счётчик (1000 сессий до переполнения uint32_t — практически никогда)
+rec_counter++;
+snprintf(path, sizeof(path), "/rec_%04lu.wav", (unsigned long)(rec_counter % 10000));
+
+// Вариант 2: ввести флаг agent_reading и блокировать stopAndSave если файл занят
+```
+
+---
+
+### 🔵 LOW-001: `es_write()` не проверяет возврат при init
+
+**Файл:** `main.cpp`, строки 80–131  
+**Описание:**  
+`es_write()` возвращает `bool`, но все вызовы в `initES8311()` игнорируют возвращаемое значение. При обрыве I2C (например, SDA не подтянут) инициализация пройдёт без ошибок в логе, но кодек останется в undefined state.
+
+**Рекомендация:**  
+Минимально — проверить критические регистры:
+```cpp
+if (!es_write(0x00, 0x1F)) {
+    Serial.println("[CODEC] FATAL: ES8311 I2C communication failed!");
+    // setState(STATE_ERROR); или halt
+    return;
+}
+```
+
+---
+
+### 🔵 LOW-002: `vad_buf` объявлен как `static` внутри `if (currentState == STATE_IDLE)`
+
+**Файл:** `main.cpp`, строки 555–556  
+**Описание:**  
+`static int16_t vad_buf[480]` и `static int vad_buf_idx = 0` — переменные не сбрасываются при выходе из STATE_IDLE и возврате. Если запись завершилась, и loop снова вошёл в IDLE, `vad_buf_idx` может содержать стale-значение, что даст ложный VAD trigger с данными из предыдущей сессии.
+
+**Исправление:**
+```cpp
+// В setState() при переходе в STATE_IDLE добавить:
+// (или при старте VAD-блока явно сбрасывать):
+// vad_buf_idx = 0; // сброс при входе в IDLE
+```
+
+---
+
+### 🔵 LOW-003: `getLatestFrame()` читает не свежие, а старые данные
+
+**Файл:** `Recorder.h`, строки 78–81  
+**Описание:**  
+`getLatestFrame()` возвращает `&phrase_buf[phrase_frames - 480]` — последние 480 сэмплов из буфера записи. Но в основном цикле VAD использует `phrase_buf[vad_processed_frames]`, а `getLatestFrame()` нигде не вызывается. Функция является мёртвым кодом. При случайном использовании даст сдвиг данных.
+
+**Рекомендация:**  
+Удалить `getLatestFrame()` или задокументировать её назначение, если она планируется к использованию в будущем.
+
+---
+
+## 5. Таблица compliance с правилами AGENTS.md
+
+| Правило | Статус | Детали |
+|---|---|---|
+| НЕ использовать `Audio.h` / ESP32-audioI2S | ✅ PASS | Используется нативный `driver/i2s_std.h` |
+| НЕ вызывать `delay()` внутри I2S callback или ISR | ✅ PASS | delay() только в setup() и main loop |
+| НЕ аллоцировать память в ISR | ✅ PASS | malloc/heap_caps_malloc только вне ISR |
+| Крупные буферы (>10KB) — ТОЛЬКО в PSRAM | ✅ PASS | `wavBuf` (2KB via PSRAM), `phrase_buf` (320KB via PSRAM) |
+| `uint8_t rawBuf[1024]` на стеке | ⚠️ PARTIAL | rawBuf[1024] на стеке — нарушение HIGH-002 |
+| MCLK (GPIO16) активен ДО initES8311() | ✅ PASS | i2s_duplex_init() → delay(200) → initES8311() |
+| PA_CTRL: LOW при boot | ✅ PASS | setup() строка 449 |
+| PA_CTRL: HIGH перед i2s_channel_write | ✅ PASS | Первый write, затем HIGH (строка 271) |
+| PA_CTRL: LOW после воспроизведения | ✅ PASS | Строка 316 |
+| WAV PCM 16000 Гц 16-bit Mono | ✅ PASS | REC_SAMPLE_RATE=16000, REC_BIT_DEPTH=16, REC_CHANNELS=1 |
+| SD буферизованная запись (chunked) | ✅ PASS | WRITE_CHUNK=4096, цикл в stopAndSave() |
+| Reg 0x01 = 0x3F | ✅ PASS | Строка 94 |
+| Reg 0x32 = 0xBF | ✅ PASS | Строка 123 |
+| Reg 0x37 = 0x08 | ✅ PASS | Строка 124 |
+| Reg 0x45 = 0x22 | ✅ PASS | Строка 125 |
+| Reg 0x08 = 0xFF | ✅ PASS | Строка 101 — LRCK divider корректен |
+| Continuous MCLK (full-duplex) | ✅ PASS | TX+RX enable в i2s_duplex_init(), switchToTX() = no-op |
+
+---
+
+## 6. Приоритетный план исправлений
+
+| Приоритет | Проблема | Файл | Строки | Усилие |
+|---|---|---|---|---|
+| 🔴 1 | HIGH-001: getPeakLevel() двойной read | Recorder.h | 83–97 | 15 мин |
+| 🔴 2 | HIGH-002: rawBuf на стеке | main.cpp | 255 | 10 мин |
+| 🔴 3 | HIGH-003: PA HIGH без проверки write | main.cpp | 268–272 | 5 мин |
+| 🟡 4 | MEDIUM-001: RX MONO vs STEREO | main.cpp + Recorder.h | 162, 60–65 | 30 мин |
+| 🟡 5 | MEDIUM-003: delay(5) в loop | main.cpp | 625 | 2 мин |
+| 🟡 6 | MEDIUM-002: calloc silence flush | main.cpp | 307–314 | 10 мин |
+| 🟡 7 | MEDIUM-004: rec_counter циклический | Recorder.h | 116 | 10 мин |
+| 🔵 8 | LOW-001: es_write без проверки | main.cpp | 90 | 15 мин |
+| 🔵 9 | LOW-002: static vad_buf не сбрасывается | main.cpp | 555 | 5 мин |
+| 🔵 10 | LOW-003: getLatestFrame() мёртвый код | Recorder.h | 78–81 | 2 мин |
+
+---
+
+*Отчёт подготовлен советником ESP-IDF Audio Hardware & ES8311 Expert, Совет разработчиков Мелвин.*

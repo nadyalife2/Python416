@@ -31,10 +31,12 @@ public:
     bool begin() {
         if (phrase_buf == nullptr) {
             // PSRAM обязателен — 320KB не влезут во внутреннюю heap
-            phrase_buf = (int16_t*)heap_caps_malloc(
-                REC_PHRASE_MAX * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            if (psramFound()) {
+                phrase_buf = (int16_t*)heap_caps_malloc(
+                    REC_PHRASE_MAX * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            }
             if (phrase_buf == nullptr) {
-                Serial.println("[REC] ERROR: PSRAM allocation failed! (need 320KB)");
+                Serial.println("[REC] ERROR: PSRAM allocation failed or PSRAM not found! (need 320KB)");
                 return false;
             }
             Serial.printf("[REC] PSRAM buf allocated: %d bytes, free PSRAM: %u\n",

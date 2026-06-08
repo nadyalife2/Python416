@@ -1,0 +1,388 @@
+# =========================================================
+# MELVIN AI COUNCIL — SpotPear ESP32-S3-1.54 V2.0
+# Framework: Arduino + ESP-IDF raw drivers
+# Audio: ES8311 codec, NS4150B amp, MB23 H11W mic
+# =========================================================
+
+name: "Melvin Voice AI Council"
+description: |
+  Консилиум специализированных агентов для разработки голосового
+  ИИ-ассистента Мелвин на базе ESP32-S3 (SpotPear V2.0).
+  Полный цикл: VAD → запись → LLM → TTS → воспроизведение.
+
+version: "2.0"
+
+# =========================================================
+# ЖЕЛЕЗО — справочник для всех агентов (ОБЯЗАТЕЛЬНО)
+# =========================================================
+hardware_context:
+  board: "SpotPear ESP32-S3-1.54 V2.0"
+  mcu: "ESP32-S3, 16MB Flash, 2MB OPI PSRAM"
+  audio_codec: "ES8311 (I2C addr 0x18)"
+  audio_amp: "NS4150B (Class D, 3W Mono)"
+  microphone: "MB23 H11W (MEMS Analog → ES8311)"
+  pinout:
+    I2C_SDA: 15
+    I2C_SCL: 14
+    I2S_MCLK: 16      # КРИТИЧНО: запускать ДО i2c init
+    I2S_BCLK: 9
+    I2S_WS: 45
+    I2S_DOUT: 8       # ESP32 TX → ES8311 DAC
+    I2S_DIN: 10       # ES8311 ADC → ESP32 RX
+    PA_CTRL: 46       # Strapping pin! LOW при boot, HIGH только при воспроизведении
+    SD_CLK: 17
+    SD_CMD: 18
+    SD_D0: 21
+    BOOT_BTN: 0
+    DISPLAY_SCLK: 4
+    DISPLAY_MOSI: 2
+    DISPLAY_DC: 47
+    DISPLAY_CS: 5
+    DISPLAY_RST: 38
+    DISPLAY_BL: 42
+  audio_standard:
+    sample_rate: 16000
+    bit_depth: 16
+    channels: 1        # Mono
+    format: "WAV PCM (LINEAR16)"
+  es8311_critical_registers:
+    "0x01": "0x3F"    # MCLK divider
+    "0x32": "0xBF"    # DAC Analog Volume MAX
+    "0x37": "0x08"    # Route DAC to output mixer
+    "0x45": "0x22"    # Output driver gain
+
+# =========================================================
+# ЧЛЕНЫ КОНСИЛИУМА
+# =========================================================
+members:
+
+  # ---------------------------------------------------------
+  # 1. AUDIO HW ENGINEER — Железо и низкоуровневые драйверы
+  # ---------------------------------------------------------
+  - id: audio_hw
+    role: "ESP-IDF Audio Hardware & ES8311 Expert"
+    model: "claude-sonnet-4.6"
+    focus_files:
+      - "src/main.cpp"           # i2s_duplex_init(), initES8311(), playWavFromSD()
+      - "include/Recorder.h"     # I2S RX, PSRAM буферы
+    instructions: |
+      Ты эксперт по низкоуровневому аудио на ESP32-S3.
+      
+      ТВОИ ЗАДАЧИ:
+      - Анализировать и улучшать код инициализации I2S (i2s_duplex_init)
+      - Контролировать правильность регистров ES8311 (Reg 0x01=0x3F, 0x32=0xBF, 0x37=0x08, 0x45=0x22)
+      - Проверять логику PA_CTRL (GPIO46): LOW при boot → HIGH только перед i2s_channel_write → LOW после
+      - Следить за корректностью переключения RX↔TX:
+          i2s_channel_disable(current) → vTaskDelay(10ms) → i2s_channel_enable(next)
+      - Оптимизировать функцию playWavFromSD() — проверять WAV-заголовок полностью (не только skip 44 bytes)
+      
+      ЗАПРЕЩЕНО:
+      - Использовать библиотеку ESP32-audioI2S или Audio.h
+      - Ставить delay() внутри I2S callback или ISR
+      - Менять sample rate с 16000 Гц без явного согласования
+      - Аллоцировать буферы в обычной heap — только PSRAM через heap_caps_malloc(size, MALLOC_CAP_SPIRAM)
+      
+      ПРОБЛЕМЫ К КОТОРЫМ ГОТОВЬСЯ:
+      - "Белый шум после воспроизведения" → PA_CTRL не выключается, проверить delay после i2s
+      - "Кодек не стартует" → MCLK должен быть активен до Wire.begin() и initES8311()
+      - "Искажённый звук при записи" → slot_cfg для RX должен быть MONO, для TX — STEREO
+      - "WAV не читается" → пропуск заголовка фиксированными 44 байтами может не работать для всех WAV
+
+  # ---------------------------------------------------------
+  # 2. ARDUINO AUDIO LIB — Высокоуровневые компоненты
+  # ---------------------------------------------------------
+  - id: arduino_audio
+    role: "Arduino Framework & Audio Pipeline Engineer"
+    model: "claude-sonnet-4.6"
+    focus_files:
+      - "include/Recorder.h"     # MelvinRecorder — VAD + запись
+      - "src/main.cpp"           # loop(), switchToRX/TX()
+    instructions: |
+      Ты специалист по Arduino-слою ESP32-S3 и аудио-пайплайну.
+      
+      ТВОИ ЗАДАЧИ:
+      - Проектировать и ревьюить MelvinRecorder (VAD → RX I2S → PSRAM → WAV)
+      - Контролировать корректность esp_vad.h: vad_create(VAD_MODE_3), vad_process(inst, buf, 16000, 30)
+      - Следить за размером PSRAM-буфера: PHRASE_MAX = 16000*10 = 160000 int16_t samples (320KB)
+      - Проверять корректность WAV-заголовка в stopAndSave():
+          - ChunkID: "RIFF", Format: "WAVE"
+          - Subchunk1Size: 16, AudioFormat: 1 (PCM)
+          - SampleRate: 16000, BitsPerSample: 16, NumChannels: 1
+          - ByteRate = SampleRate * NumChannels * BitsPerSample/8 = 32000
+          - BlockAlign = NumChannels * BitsPerSample/8 = 2
+      - Оптимизировать main loop() — не блокировать display redraw (REDRAW_MS=80)
+      
+      ЗАПРЕЩЕНО:
+      - delay() внутри VAD-цикла или I2S callback
+      - malloc/new внутри ISR
+      - Игнорировать возврат i2s_channel_write (если ESP_ERR_TIMEOUT — добавить vTaskDelay(1))
+      
+      КРИТИЧЕСКАЯ ЛОГИКА VAD:
+      - В STATE_IDLE: читать 480 samples (30ms @ 16kHz), передавать в vad_process
+      - В STATE_RECORDING: 1.5 сек тишины → stopAndSave()
+      - Максимум записи: 10 сек (timeout = 10000ms в loop)
+
+  # ---------------------------------------------------------
+  # 3. LLM INTEGRATOR — Gemini Multimodal + каскад ключей
+  # ---------------------------------------------------------
+  - id: llm_integrator
+    role: "Multi-Provider LLM & Dialog Engineer"
+    model: "gemini-3.5-flash"
+    focus_files:
+      - "include/Agent.h"        # MelvinAgent — callGemini(), askAI(), история
+      - "include/Config.h"       # MelvinConfig — ключи, personality, промпты
+    instructions: |
+      Ты специалист по LLM-интеграции и диалоговым системам.
+      
+      ТВОИ ЗАДАЧИ:
+      - Оптимизировать callGemini() в Agent.h для минимальной latency
+      - Управлять Base64-кодированием WAV через mbedtls_base64_encode (НЕ внешние либы)
+      - Аллоцировать b64Buf и audioBuf ТОЛЬКО в PSRAM: heap_caps_malloc(size, MALLOC_CAP_SPIRAM)
+      - Реализовывать каскад ключей: comma-separated в cfg.gemini_keys → iterate on 429/500 errors
+      - Управлять /history.json на SD: appendToHistory(), getRecentHistory(maxBytes=2048)
+      - Интегрировать RSS новости через getRSSHeadlines() в системный промпт
+      - Настраивать fallback: Gemini → Groq → OpenRouter
+      
+      ТЕКУЩИЙ ENDPOINT:
+        https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={KEY}
+      
+      ПРИОРИТЕТЫ:
+      1. Latency < 3 сек для коротких ответов
+      2. Не превышать context window — обрезать историю до 2048 байт
+      3. Промпт должен включать personality (Rick/Calm/Podcast) из cfg.getEffectivePrompt()
+      4. При ответе > 200 символов — разбивать на части для TTS
+      
+      ЗАПРЕЩЕНО:
+      - Хранить base64-строку в обычной String на stack (переполнение стека)
+      - Таймаут HTTP < 30000ms (Google может долго думать)
+      - Игнорировать ошибки HTTP != 200
+
+  # ---------------------------------------------------------
+  # 4. TTS SYNTHESIZER — Google TTS + PSRAM декодинг
+  # ---------------------------------------------------------
+  - id: tts_synthesizer
+    role: "Google TTS & Audio Synthesis Specialist"
+    model: "gemini-3.5-flash"
+    focus_files:
+      - "include/MelvinTTS.h"    # MelvinTTS — synthesizeGoogle(), speak()
+      - "src/main.cpp"           # playWavFromSD() — вызывается после TTS
+    instructions: |
+      Ты специалист по синтезу речи и аудио-пайплайну TTS→Playback.
+      
+      ТВОИ ЗАДАЧИ:
+      - Оптимизировать synthesizeGoogle() в MelvinTTS.h
+      - Управлять Google Cloud TTS: POST /v1/text:synthesize
+          - voice.languageCode: "ru-RU"
+          - voice.name: из cfg.tts_voice (например "ru-RU-Standard-A")
+          - audioConfig.audioEncoding: "LINEAR16" (уже правильно установлено)
+          - audioConfig.sampleRateHertz: 16000 (ДОБАВИТЬ — иначе Google вернёт 22050/24000)
+      - PSRAM декодирование Base64: mbedtls_base64_decode в heap_caps_malloc(MALLOC_CAP_SPIRAM)
+      - Сохранять результат как /resp.wav и вызывать playWavFromSD("/resp.wav")
+      
+      КРИТИЧЕСКАЯ ПРОБЛЕМА (требует исправления):
+        В текущем MelvinTTS.h не задан sampleRateHertz в запросе.
+        Google TTS по умолчанию вернёт 24000 Гц вместо 16000.
+        Результат: воспроизведение "роботизированного" звука на неправильной скорости.
+        
+        ИСПРАВЛЕНИЕ: добавить в JSON запрос:
+          doc["audioConfig"]["sampleRateHertz"] = 16000;
+      
+      ТАКЖЕ НУЖНО:
+      - Добавить проверку размера decoded перед записью в SD
+      - Текст > 500 символов разбивать на части (Google TTS limit ~5000 chars, но ESP RAM ограничена)
+      - Логировать длину base64 ответа для отладки
+      
+      ЗАПРЕЩЕНО:
+      - Аллоцировать decoded buffer в обычной heap (> 50KB не влезет)
+      - Игнорировать код ответа от Google TTS
+
+  # ---------------------------------------------------------
+  # 5. SYSTEM ARCHITECT — FSM, память, WiFi, дисплей
+  # ---------------------------------------------------------
+  - id: system_architect
+    role: "State Machine, Resource Manager & Integration Lead"
+    model: "claude-sonnet-4.6"
+    focus_files:
+      - "src/main.cpp"           # setup(), loop(), FSM states
+      - "include/MelvinState.h"  # RobotState enum
+      - "include/Config.h"       # ConfigManager, personalities
+      - "include/WebUI.h"        # Captive portal
+    instructions: |
+      Ты ведущий архитектор системы. Твоя роль — интеграция компонентов
+      и контроль качества всей системы.
+      
+      ТВОИ ЗАДАЧИ:
+      - Следить за корректностью FSM: STATE_BOOT → STATE_CONNECTING → STATE_IDLE → 
+        STATE_RECORDING → STATE_THINKING → STATE_SPEAKING → STATE_IDLE
+      - Управлять порядком инициализации в setup():
+          1. Serial + GPIO (PA_CTRL=LOW!)
+          2. Display
+          3. SD Card (1-bit mode: SD_MMC.begin("/sdcard", true))
+          4. i2s_duplex_init() — запускает MCLK на GPIO16
+          5. delay(200) — стабилизация MCLK
+          6. Wire.begin(15, 14) + initES8311()
+          7. vad_create(VAD_MODE_3)
+          8. connectWifi()
+      - Контролировать WiFi reconnect (WiFi.status() != WL_CONNECTED → reconnect)
+      - Мониторить heap: esp_get_free_heap_size() и esp_get_free_internal_heap_size()
+      - Оптимизировать display redraw — не рисовать если state не изменился
+      - Управлять captive portal для первоначальной настройки
+      
+      ARCHITECTURE DECISIONS:
+      - Все тяжёлые операции (HTTP, SD I/O) в основном loop, не в ISR
+      - VAD буфер: 480 int16_t = 960 bytes (на стеке, нормально)
+      - Recording буфер: в PSRAM, heap_caps_malloc(320000, MALLOC_CAP_SPIRAM)
+      - HTTP таймаут: min 30 сек (Gemini), min 15 сек (Google TTS)
+      
+      ПРОБЛЕМЫ К КОТОРЫМ ГОТОВЬСЯ:
+      - Memory leak в HTTP клиентах → всегда вызывать http.end() в finally-блоке
+      - SD write failure → проверять return value file.write()
+      - WiFi потеря связи → добавить reconnect логику в STATE_IDLE
+      - "Белый экран" после перезагрузки → убедиться что display init идёт первым
+
+# =========================================================
+# ОРКЕСТРАЦИЯ
+# =========================================================
+orchestration:
+  mode: "pipeline"
+  
+  # Основной пайплайн голосового ассистента
+  sequence:
+    - vad_recorder       # Захват и детекция речи
+    - audio_hw           # Валидация HW-слоя
+    - llm_integrator     # Отправка в Gemini, получение ответа
+    - tts_synthesizer    # Синтез речи через Google TTS
+    - system_architect   # Финальная ревью и интеграция
+  
+  max_rounds: 3
+  consensus_required: false
+  
+  # Правила передачи данных между агентами
+  handoff_protocol:
+    vad_to_llm: "path to WAV file on SD card (e.g. /rec_001.wav)"
+    llm_to_tts: "text string (answer from Gemini, max 500 chars per chunk)"
+    tts_to_hw:  "path to synthesized WAV (always /resp.wav)"
+  
+  # Когда вызывать каждого агента
+  triggers:
+    audio_hw:
+      - "Проблемы с качеством звука"
+      - "Кодек не инициализируется"
+      - "Нужно изменить I2S конфигурацию"
+      - "Белый шум при воспроизведении"
+    arduino_audio:
+      - "VAD не срабатывает"
+      - "Запись обрывается"
+      - "WAV файл некорректный"
+      - "Переполнение буфера"
+    llm_integrator:
+      - "Изменить промпт или personality"
+      - "Добавить новый LLM провайдер"
+      - "Проблемы с Base64 кодированием"
+      - "Ошибки API Gemini"
+    tts_synthesizer:
+      - "Роботизированный звук в ответах"
+      - "TTS не работает"
+      - "Нужна другая скорость/голос"
+      - "Проблемы с декодированием Base64"
+    system_architect:
+      - "Архитектурные изменения"
+      - "Утечки памяти"
+      - "WiFi проблемы"
+      - "Новый функционал"
+
+# =========================================================
+# ИЗВЕСТНЫЕ ПРОБЛЕМЫ (из анализа кода)
+# =========================================================
+known_issues:
+  - id: ISSUE-001
+    severity: HIGH
+    file: "include/MelvinTTS.h"
+    line: 56
+    description: |
+      sampleRateHertz не задан в Google TTS запросе.
+      Google вернёт 24000 Гц вместо 16000 → роботизированный звук.
+    fix: |
+      Добавить: doc["audioConfig"]["sampleRateHertz"] = 16000;
+    owner: tts_synthesizer
+
+  - id: ISSUE-002
+    severity: MEDIUM
+    file: "include/Agent.h"
+    line: "123-136"
+    description: |
+      callGemini() аллоцирует buf и b64Buf в обычной heap.
+      При WAV > 50KB это может вызвать heap fragmentation.
+    fix: |
+      Заменить malloc() на heap_caps_malloc(size, MALLOC_CAP_SPIRAM)
+    owner: llm_integrator
+
+  - id: ISSUE-003
+    severity: MEDIUM
+    file: "include/MelvinTTS.h"
+    line: 73
+    description: |
+      decoded buffer аллоцируется в обычной heap (malloc).
+      При большом TTS ответе (> 80KB) может не хватить памяти.
+    fix: |
+      Заменить malloc() на heap_caps_malloc(inputLen, MALLOC_CAP_SPIRAM)
+    owner: tts_synthesizer
+
+  - id: ISSUE-004
+    severity: LOW
+    file: "src/main.cpp"
+    line: "187"
+    description: |
+      playWavFromSD() всегда пропускает ровно 44 байта WAV-заголовка.
+      Некоторые WAV имеют LIST chunk после fmt → заголовок > 44 байт.
+    fix: |
+      Парсить заголовок правильно: читать "data" subchunk и его offset.
+    owner: audio_hw
+
+  - id: ISSUE-005
+    severity: LOW
+    file: "src/main.cpp"
+    line: "193"
+    description: |
+      wavBuf (stereo expansion buffer) аллоцируется в heap.
+      При больших WAV файлах рекомендуется PSRAM.
+    fix: |
+      heap_caps_malloc(bufSize * 4, MALLOC_CAP_SPIRAM) для стерео буфера.
+    owner: audio_hw
+
+# =========================================================
+# ПЕРВЫЕ ЗАДАЧИ ДЛЯ КОНСИЛИУМА
+# =========================================================
+initial_tasks:
+  - task_id: "TASK-001"
+    title: "Исправить Sample Rate в Google TTS запросе"
+    priority: HIGH
+    owner: tts_synthesizer
+    description: |
+      В MelvinTTS.h добавить sampleRateHertz: 16000 в audioConfig.
+      Это критично для правильного воспроизведения TTS через ES8311.
+    acceptance_criteria:
+      - "doc[\"audioConfig\"][\"sampleRateHertz\"] = 16000 присутствует в коде"
+      - "Звук воспроизводится без роботизации"
+
+  - task_id: "TASK-002"
+    title: "Перевести буферы Agent.h и MelvinTTS.h на PSRAM"
+    priority: HIGH
+    owner: llm_integrator
+    description: |
+      Заменить malloc() на heap_caps_malloc(size, MALLOC_CAP_SPIRAM)
+      в callGemini() и synthesizeGoogle() для больших буферов.
+    acceptance_criteria:
+      - "esp_get_free_heap_size() остаётся > 100KB после цикла разговора"
+      - "Нет heap allocation failed в Serial логе"
+
+  - task_id: "TASK-003"
+    title: "Правильный парсинг WAV заголовка в playWavFromSD()"
+    priority: MEDIUM
+    owner: audio_hw
+    description: |
+      Вместо seek(44) реализовать корректный парсинг:
+      читать RIFF → fmt → найти "data" chunk → seek к его данным.
+    acceptance_criteria:
+      - "hello.wav воспроизводится корректно"
+      - "resp.wav (от Google TTS) воспроизводится корректно"

@@ -1,203 +1,148 @@
-# Melvin System Architecture Review & Analysis Report
-
-This report provides a comprehensive architectural review of the Melvin Voice Assistant codebase (`src/main.cpp`, `include/MelvinState.h`, `include/Config.h`, and `include/WebUI.h`). It focuses on system initialization, FSM stability, memory management (specifically heap exhaustion risks during network/API calls), WiFi reconnection resilience, and overall hardware/software integration.
-
----
-
-## 1. Executive Summary
-
-Melvin is a dual-framework голосовой ассистент built on the ESP32-S3 using PlatformIO/Arduino for main structure and raw ESP-IDF APIs (`driver/i2s_std.h`) for precise audio control. 
-While the codebase correctly respects the hardware constraints of the SpotPear V2.0 board (such as the `PA_CTRL` strapping pin and 1-bit SDMMC configurations), it contains several critical software-level architectural vulnerabilities:
-1. **Critical Memory Allocation Risk (OOM / Crash):** Large audio buffers (up to 430KB in Base64 representation) are converted into standard `String` objects. In ESP32 Arduino, these allocations target internal SRAM instead of PSRAM (SPIRAM), which will exhaust the heap and cause immediate crashes.
-2. **Blocking Operations & Display Freezes:** The FSM handles network requests (`askAI`) and audio playback (`playWavFromSD`) synchronously in the main loop, blocking the screen redraw timer and causing display animations to freeze.
-3. **Synchronous WiFi Reconnection:** WiFi reconnection is handled synchronously in the main thread with a blocking loop, causing an 8-second system freeze if connection is lost.
-4. **Fragile I2S Channel Switching:** Switching I2S TX/RX relies on a static variable in the main loop rather than being a clean consequence of FSM transitions.
+# Архитектурный отчёт: Система Мелвин v7.0
+**Дата:** 2026-06-05  
+**Архитектор:** Совет разработчиков прошивки Мелвин  
+**Файлы:** `main.cpp` (627 строк), `MelvinState.h`, `Config.h`, `WebUI.h`
 
 ---
 
-## 2. Component Analysis
+## 1. FSM — Конечный Автомат Состояний
 
-### 2.1 Initialization Sequence
-The initialization sequence in `setup()` follows a correct hardware-safety order:
-1. **PA Mute:** `PA_CTRL_PIN` (GPIO46) is driven `LOW` immediately to prevent speaker pop and hiss.
-2. **Display Init:** SPI Display (`lcd.init()`) is initialized and the boot face is rendered.
-3. **SD Card Init:** SDMMC (1-bit mode, pins 17, 18, 21) is mounted, followed by loading `config.json`.
-4. **I2S MCLK Stabilization:** `i2s_duplex_init()` starts the I2S clock, including `MCLK` on GPIO16. The code then waits for `delay(200)` to stabilize the clock before interacting with the codec.
-5. **ES8311 Codec Config:** `Wire.begin()` and `initES8311()` are called. This conforms to the hardware constraint that `MCLK` must be active and stable before ES8311 registers are written over I2C.
-6. **VAD & Recorder Init:** Local VAD is created, and PSRAM buffers (320KB) are allocated.
-7. **WiFi Connection:** WiFi STA is initialized or AP mode fallback is triggered.
+### 1.1 Определённые состояния (`MelvinState.h`)
 
-#### Potential Issue:
-* **AP Mode Fail-Safe:** If the SD card fails to mount or `config.json` is missing, `configMgr` continues with empty WiFi credentials. The system automatically falls back to AP mode (`STATE_CONFIG_AP`), which is excellent fail-safe design. However, the WebUI restart logic is unsafe.
+| Состояние       | Описание                          |
+|-----------------|-----------------------------------|
+| `STATE_BOOT`    | Начальная загрузка                |
+| `STATE_CONFIG_AP` | AP-режим, нет WiFi              |
+| `STATE_CONNECTING` | Подключение к WiFi             |
+| `STATE_IDLE`    | Ожидание, VAD слушает             |
+| `STATE_RECORDING` | Запись голоса                  |
+| `STATE_THINKING` | Запрос к AI                      |
+| `STATE_SPEAKING` | Воспроизведение ответа           |
+| `STATE_ERROR`   | Ошибка (определено, но не используется) |
 
----
+### 1.2 Реальные переходы FSM (из кода)
 
-### 2.2 FSM Stability & State Transitions
-The state transitions are defined in `MelvinState.h` and managed in `src/main.cpp`. The current flow is:
-```mermaid
-stateDiagram-v2
-    [*] --> STATE_BOOT
-    STATE_BOOT --> STATE_CONNECTING : connectWifi()
-    STATE_BOOT --> STATE_CONFIG_AP : No WiFi credentials
-    STATE_CONNECTING --> STATE_IDLE : WiFi Connected
-    STATE_CONNECTING --> STATE_CONFIG_AP : WiFi Connection Timeout
-    STATE_CONFIG_AP --> STATE_BOOT : Save Config (Reboot)
-    
-    state STATE_IDLE {
-        [*] --> RX_Enabled
-        RX_Enabled --> VAD_Listening
-    }
-    
-    STATE_IDLE --> STATE_RECORDING : VAD Speech Trigger
-    STATE_RECORDING --> STATE_THINKING : Silence / Timeout / Button Press
-    STATE_THINKING --> STATE_SPEAKING : API Response Received
-    STATE_SPEAKING --> STATE_IDLE : Playback Completed
+```
+STATE_BOOT
+    ↓ (setup())
+STATE_CONNECTING  ← connectWifi() вызывает setState()
+    ↓ WL_CONNECTED
+STATE_SPEAKING    ← "Я готов к работе!"
+    ↓
+STATE_IDLE
+    ↓ VAD / кнопка
+STATE_RECORDING
+    ↓ тишина 1.5с / кнопка / таймаут 10с
+STATE_THINKING
+    ↓
+STATE_SPEAKING
+    ↓
+STATE_IDLE
+
+Альтернатива:
+STATE_CONNECTING → STATE_CONFIG_AP (нет WiFi)
 ```
 
-#### Found Issues:
-1. **Frozen Display Animations:** During `STATE_THINKING` (Gemini request) and `STATE_SPEAKING` (Google TTS synthesis & playback), the code blocks the execution of `loop()`. The animation loop (`now - lastRedrawMs >= REDRAW_MS`) is skipped, freezing the rabbit's face.
-2. **Fragile I2S RX/TX Switching:**
-   Switching relies on a local static variable `wasIdle` in `loop()` (lines 464-468):
-   ```cpp
-   static bool wasIdle = false;
-   if (!wasIdle) {
-       switchToRX();
-       wasIdle = true;
-   }
-   ```
-   If recording stops due to timeout or button press, the state is changed to `STATE_IDLE`, but `wasIdle` is **not** reset to `false` in those blocks. If the code did not trigger VAD directly (e.g., if a timeout forced it), the system would fail to call `switchToRX()`, leaving I2S in TX mode and breaking VAD listening forever. (Currently, VAD trigger sets `wasIdle = false` right before state change, which acts as a workaround, but this coupling is fragile).
-3. **Hard Crash on API Reboot:**
-   In `/api/save`, the server executes:
-   ```cpp
-   delay(500);
-   ESP.restart();
-   ```
-   This delay and reboot happen inside the AsyncWebServer callback thread. This can corrupt the TCP stack and prevent the client from receiving the `"OK"` response, sometimes causing the ESP32 to crash or hang.
+### 1.3 Проблемы FSM
+
+**КРИТИЧНО [FSM-01]: `STATE_ERROR` определён, но нигде не используется**
+- Ошибки SD-карты, ошибки кодека, провалы `askAI()` — всё обрабатывается молча
+- Пользователь не видит лицо "ошибки", анимация не меняется
+- **Решение:** Добавить переход в `STATE_ERROR` при PSRAM alloc fail, codec init fail, SD fail
+
+**ПРЕДУПРЕЖДЕНИЕ [FSM-02]: Переход `STATE_BOOT → STATE_CONNECTING` не отображается на дисплее**
+- В `setup()` нет `setState(STATE_BOOT)` — начальное состояние установлено через инициализатор переменной `currentState = STATE_BOOT`
+- `drawFace(canvas, STATE_BOOT, 0)` вызывается напрямую, минуя `setState()`
+- `setState()` проверяет `if (currentState == s) return;`, значит первый вызов `setState(STATE_CONNECTING)` сработает корректно
+- **Статус:** Допустимо, но неочевидно — рекомендуется документировать
+
+**ПРЕДУПРЕЖДЕНИЕ [FSM-03]: В состоянии `STATE_THINKING` и `STATE_SPEAKING` дисплей не перерисовывается в loop()**
+- Оба состояния выполняются синхронно (`askAI()`, `tts.speak()`)
+- Единственный редрав во время воспроизведения — внутри `playWavFromSD()`, но только там
+- Во время `askAI()` (STATE_THINKING) дисплей полностью "замораживается"
+- **Решение:** Внутри `Agent::askAI()` добавить периодический вызов `drawFace()` через указатель на callback или FreeRTOS таск
 
 ---
 
-### 2.3 Memory Leak & Heap Exhaustion Checks
+## 2. Порядок инициализации в `setup()`
 
-All network objects (`WiFiClientSecure`, `HTTPClient`) are stack-allocated in `Agent.h` and `MelvinTTS.h`, meaning their memory is cleaned up when functions return, and `http.end()` is properly called on all return paths. 
+### 2.1 Фактический порядок (строки 445–496)
 
-However, there is a **high risk of Out of Memory (OOM) crashes** due to large dynamic allocations:
-
-#### 1. Audio Base64 Encoding (Gemini Request)
-In `Agent.h` (lines 124-138):
-```cpp
-uint8_t* buf = (uint8_t*)heap_caps_malloc(fileSize, MALLOC_CAP_SPIRAM); // ~320KB in PSRAM
-...
-uint8_t* b64Buf = (uint8_t*)heap_caps_malloc(b64Len + 1, MALLOC_CAP_SPIRAM); // ~430KB in PSRAM
-...
-String base64Audio = String((char*)b64Buf); // COPIES 430KB into Arduino String (SRAM)
-free(b64Buf);
-free(buf);
 ```
-* **The Bug:** `String` allocations in Arduino ESP32 use standard `malloc()`, which defaults to internal SRAM. Attempting to allocate a contiguous `String` of 430KB in SRAM will fail on the ESP32-S3 (which only has ~100-200KB of free SRAM during runtime).
-* **Double Allocation:** When building `JsonDocument doc`, ArduinoJson makes another copy of the strings. Then, `serializeJson(doc, body)` creates *another* `String body` (430KB+), requiring a third huge chunk of internal SRAM. This will guarantee an OOM crash.
-
-#### 2. TTS Base64 Decoding (Google TTS Response)
-In `MelvinTTS.h` (lines 72-88):
-```cpp
-String response = http.getString(); // Loads entire JSON response (450KB) into SRAM
-JsonDocument res;
-deserializeJson(res, response); // Parses and duplicates tokens in SRAM
-String base64Audio = res["audioContent"].as<String>(); // Copies 430KB base64 to SRAM
-...
-uint8_t* decoded = (uint8_t*)heap_caps_malloc(inputLen, MALLOC_CAP_SPIRAM); // Decodes to PSRAM
+1. Serial.begin(115200)                    [L446]
+2. pinMode(BOOT_BTN_PIN, INPUT_PULLUP)     [L447]
+3. pinMode(PA_CTRL_PIN, OUTPUT)            [L448]
+4. digitalWrite(PA_CTRL_PIN, LOW)          [L449]  ✅ PA_CTRL=LOW ПЕРВЫМ
+5. lcd.init() + canvas + drawFace()        [L452-455] ✅ Display
+6. SD_MMC.setPins(17,18,21) + begin()      [L458-475] ✅ SD Card 1-bit
+7. i2s_duplex_init()                       [L478]     ✅ I2S → MCLK активен
+8. delay(200)                              [L479]     ✅ Стабилизация MCLK
+9. Wire.begin(SDA=15, SCL=14)              [L482]     ✅ I2C
+10. initES8311()                           [L483]     ✅ Кодек ПОСЛЕ MCLK
+11. vad_create(VAD_MODE_3)                 [L486]     ✅ VAD
+12. recorder.begin()                       [L489]     ✅ Recorder (PSRAM)
+13. WiFi.setAutoReconnect(true)            [L494]     ✅ Auto-reconnect
+14. connectWifi()                          [L495]     ✅ WiFi
 ```
-* **The Bug:** The entire raw HTTP response containing base64 audio is loaded into SRAM via `http.getString()`. The peak memory consumption here exceeds **1MB of heap** (mostly SRAM), which will instantly crash the ESP32.
 
----
+### 2.2 Оценка порядка инициализации
 
-### 2.4 WiFi Auto-Reconnect
-The reconnection implementation in `loop()` (lines 437-459) checks the connection status every 15 seconds.
+| Пункт | Требование | Факт | Статус |
+|-------|-----------|------|--------|
+| PA_CTRL=LOW первым | До любого аудио | L449 (4-й шаг) | ✅ |
+| Display init | До WiFi | L452 (5-й шаг) | ✅ |
+| SD Card 1-bit | Пины 17,18,21 | L458 `setPins(17,18,21)` | ✅ |
+| i2s_duplex_init() → delay(200) | До ES8311 | L478→L479 | ✅ |
+| initES8311() после MCLK | MCLK активен | L483 (после I2S) | ✅ |
+| vad_create(VAD_MODE_3) | Любое место | L486 | ✅ |
+| WiFi.setAutoReconnect(true) | До connectWifi | L494 | ✅ |
+| connectWifi() | После всего | L495 | ✅ |
 
+**Вывод: Порядок инициализации корректен. Все критические требования соблюдены.**
+
+### 2.3 Замечания по `setup()`
+
+**ПРЕДУПРЕЖДЕНИЕ [INIT-01]: `configMgr.load()` вызывается только если SD готова**
 ```cpp
-if (WiFi.status() != WL_CONNECTED) {
-    WiFi.disconnect();
-    WiFi.begin(configMgr.config.wifi_ssid.c_str(), configMgr.config.wifi_pass.c_str());
-    uint32_t t = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t < 8000) {
-        delay(400); // Synchronous block
-    }
+if (SD_MMC.begin("/sdcard", true)) {
+    sdReady = true;
+    configMgr.load();
 }
 ```
+- Если SD не найдена, `config` останется с дефолтами — это нормально
+- НО `recorder.begin()` также зависит от наличия SD для сохранения WAV!
+- `sdReady = false` + попытка `recorder.stopAndSave()` вернёт пустой путь
+- **Статус:** Защита есть (проверка `path.length() > 0`), но лог предупреждения отсутствует
 
-#### Found Issues:
-* **Blocking Loop:** During the 8-second reconnect loop, the main FSM, button checks, display redrawing, and web server processes are completely blocked.
-* **Redundant Triggers:** Calling `WiFi.begin()` inside `loop()` repeatedly without letting the ESP32 WiFi stack handle auto-reconnect internally can cause routing tables to overflow.
-
----
-
-### 2.5 Overall System Integration
-* **PA Pin Control:** The code strictly complies with the `PA_CTRL` power control rule. It is turned on right before feeding I2S TX and muted with a small delay after playback.
-* **Audio-Standard Compatibility:** The audio configuration uses 16kHz, 16-bit Mono. `playWavFromSD` expands mono to stereo in a 4KB PSRAM buffer to feed the ES8311, which expects a stereo slot config. This complies with hardware and AI API audio standards.
-* **Dual Framework Compliance:** The design successfully uses PlatformIO with raw ESP-IDF I2S APIs, matching the production standard specified in `AGENTS.md` and `GEMINI.md`.
-
----
-
-## 3. Proposed Fixes & Architectural Enhancements
-
-### 3.1 Memory Optimization: Stream-Based HTTP POST (Gemini API)
-To avoid holding 430KB base64 strings in internal SRAM, we can stream the JSON payload directly to the TCP socket using chunked transfer encoding or writing directly to the `WiFiClientSecure` stream.
-
-#### Proposed Code for `Agent.h`:
+**ПРЕДУПРЕЖДЕНИЕ [INIT-02]: `recorder.begin()` при провале не блокирует работу**
 ```cpp
-// 1. Manually write the JSON envelope headers and start the stream
-client.print("POST /v1beta/models/gemini-1.5-flash:generateContent?key=");
-client.print(key);
-client.println(" HTTP/1.1");
-client.println("Host: generativelanguage.googleapis.com");
-client.println("Content-Type: application/json");
-client.print("Content-Length: ");
-client.println(estimatedContentLength); // pre-calculated
-client.println();
-
-// 2. Write JSON parts
-client.print("{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"");
-client.print(prompt);
-client.print("\"},{\"inline_data\":{\"mime_type\":\"audio/wav\",\"data\":\"");
-
-// 3. Stream base64 audio directly from SD card / PSRAM buffer in small chunks (e.g. 3KB)
-size_t remaining = fileSize;
-uint8_t chunk[3072]; // 3KB buffer
-while (remaining > 0) {
-    size_t readLen = file.read(chunk, sizeof(chunk));
-    // Encode 'chunk' to base64 directly to client stream
-    mbedtls_base64_encode(b64Temp, sizeof(b64Temp), &written, chunk, readLen);
-    client.write(b64Temp, written);
-    remaining -= readLen;
+if (!recorder.begin()) {
+    Serial.println("[SETUP] FATAL: Recorder PSRAM alloc failed!");
+    // ← нет halt, нет setState(STATE_ERROR)
 }
-
-// 4. Write closing JSON envelope
-client.print("\"}}]}]}");
 ```
-* **Impact:** Reduces peak SRAM usage during AI requests from **~1.5MB** to **<10KB**, making OOM crashes physically impossible.
+- При отсутствии PSRAM система продолжит работу, но запись будет невозможна
+- **Решение:** `setState(STATE_ERROR); while(1) { delay(1000); }` или циклическая индикация на дисплее
 
-### 3.2 Memory Optimization: Stream-Based Response Decoding (Google TTS)
-Instead of calling `http.getString()`, we can retrieve the HTTP stream and decode the Base64 data on the fly.
+---
 
-```cpp
-WiFiClientSecure* stream = http.getStreamPtr();
-// Look for "\"audioContent\":\"" token in the stream, then read, base64-decode 
-// block-by-block, and write directly to "/resp.wav" on the SD card.
-```
-* **Impact:** Completely avoids loading the 450KB response string into internal SRAM, maintaining peak heap memory under **20KB**.
+## 3. `setState()` — Переключение I2S
 
-### 3.3 FSM-Safe I2S Switching
-Remove the static `wasIdle` variable from `loop()`. Instead, embed I2S switching directly into `setState()` in `src/main.cpp`:
+### 3.1 Реализация (строки 328–347)
 
 ```cpp
 void setState(RobotState s) {
     if (currentState == s) return;
-    Serial.printf("[FSM] %s → %s\n", stateName(currentState), stateName(s));
     
-    // Auto-switch I2S mode based on new state
+    // Централизованное переключение I2S
     if (s == STATE_IDLE || s == STATE_RECORDING) {
         switchToRX();
     } else {
         switchToTX();
+    }
+    
+    if (s == STATE_RECORDING) {
+        vad_processed_frames = 0;
     }
     
     currentState = s;
@@ -207,66 +152,363 @@ void setState(RobotState s) {
 }
 ```
 
-### 3.4 Non-Blocking Asynchronous WiFi Reconnect
-Configure the ESP32 to handle reconnects in the background, or use WiFi events:
+### 3.2 Анализ `switchToRX()` / `switchToTX()`
 
 ```cpp
-// In setup():
-WiFi.setAutoReconnect(true);
+void switchToRX() {
+    // Flush буфера RX (до 50 итераций)
+    size_t br = 0;
+    int16_t dummy[128];
+    int limit = 50;
+    while (limit-- > 0 && i2s_channel_read(..., 0) == ESP_OK && br > 0) { }
+}
 
-// Non-blocking status check in loop():
-static uint32_t lastWifiCheckMs = 0;
-if (currentState == STATE_IDLE && now - lastWifiCheckMs > 15000) {
-    lastWifiCheckMs = now;
+void switchToTX() {
+    // No-op — полный дуплекс, MCLK всегда активен
+}
+```
+
+**Архитектурное решение: Full-Duplex режим** — оба канала I2S (TX и RX) активны одновременно. Переключение сводится к сбросу RX-буфера перед прослушиванием.
+
+### 3.3 Проблемы `setState()`
+
+**КРИТИЧНО [FSM-04]: `setState()` вызывает `switchToTX()` для `STATE_THINKING`**
+```cpp
+} else {
+    switchToTX(); // вызывается для STATE_THINKING, STATE_SPEAKING, STATE_CONNECTING...
+}
+```
+- `switchToTX()` — no-op, проблемы нет на практике
+- НО семантически неверно: `STATE_THINKING` не использует I2S вообще
+- Лишний вызов безвреден, но создаёт путаницу при отладке
+
+**ПРЕДУПРЕЖДЕНИЕ [FSM-05]: `switchToRX()` с таймаутом `0` (non-blocking)**
+```cpp
+i2s_channel_read(rx_handle, dummy, sizeof(dummy), &br, 0)
+```
+- Таймаут `0` означает чтение только готовых данных из DMA
+- При полном дуплексе это правильно — не блокирует, flush происходит быстро
+- **Статус:** Корректно
+
+**ПРЕДУПРЕЖДЕНИЕ [FSM-06]: Дисплей в `setState()` обновляется до записи `currentState`**
+```cpp
+// НЕВЕРНЫЙ ПОРЯДОК:
+currentState = s;           // ← сначала обновляем состояние
+drawFace(canvas, currentState, animTick);  // ← потом рисуем (OK, использует currentState)
+```
+- Фактически порядок правильный: сначала `currentState = s`, потом `drawFace`
+- **Статус:** Корректно
+
+---
+
+## 4. WiFi Reconnect
+
+### 4.1 Механизм (строки 494, 530–541)
+
+```cpp
+// setup():
+WiFi.setAutoReconnect(true);  // ✅ Фоновый авто-реконнект ESP32
+
+// loop() — проверка каждые 15 секунд в STATE_IDLE:
+if (currentState == STATE_IDLE && (now - lastWifiCheckMs > 15000)) {
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[WiFi] Connection lost! Waiting for auto-reconnect...");
         wifiConnected = false;
-        setState(STATE_CONNECTING);
     } else if (!wifiConnected) {
         wifiConnected = true;
-        setState(STATE_IDLE);
     }
 }
 ```
 
-### 3.5 Safe Asynchronous Web Server Reboot
-Instead of delaying and rebooting inside the callback, set a global flag:
+### 4.2 Оценка
+
+| Механизм | Статус |
+|----------|--------|
+| `WiFi.setAutoReconnect(true)` | ✅ Установлен ДО `connectWifi()` |
+| Мониторинг только в `STATE_IDLE` | ⚠️ Не работает во время RECORDING/THINKING |
+| Флаг `wifiConnected` синхронизируется | ✅ |
+| Повторная попытка ручного коннекта | ❌ Нет — только пассивный мониторинг |
+
+**ПРЕДУПРЕЖДЕНИЕ [WIFI-01]: Мониторинг WiFi не работает в STATE_RECORDING/THINKING/SPEAKING**
+- Если WiFi отвалился во время записи, `wifiConnected` останется `true`
+- Следующий вызов `agent.askAI()` провалится молча
+- **Решение:** Проверять `WiFi.status()` непосредственно перед `askAI()`:
+```cpp
+if (path.length() > 0 && WiFi.status() == WL_CONNECTED) {
+    // вместо wifiConnected
+}
+```
+
+**ПРЕДУПРЕЖДЕНИЕ [WIFI-02]: При `startAPMode()` `WiFi.setAutoReconnect()` не сбрасывается**
+- В AP-режиме auto-reconnect пытается подключиться к прежней AP
+- `WiFi.mode(WIFI_AP)` должен отменять это, но явно стоит добавить `WiFi.setAutoReconnect(false)` в `startAPMode()`
+
+---
+
+## 5. `shouldReboot` — Безопасная перезагрузка
+
+### 5.1 Реализация
 
 ```cpp
+// WebServer callback (другой поток):
+shouldReboot = true;  // [L384]
+
+// loop() (основной поток):
+if (shouldReboot) {
+    Serial.println("[SYSTEM] Safe rebooting in 500ms...");
+    delay(500);
+    ESP.restart();  // [L519]
+}
+```
+
+### 5.2 Оценка
+
+| Аспект | Статус |
+|--------|--------|
+| Флаг устанавливается из callback AsyncWebServer | ✅ |
+| Проверка и reboot в основном потоке loop() | ✅ |
+| delay(500) перед restart() | ✅ Даёт время отправить HTTP-ответ |
+| `volatile` для `shouldReboot` | ❌ ОТСУТСТВУЕТ — потенциальный race condition |
+
+**КРИТИЧНО [REBOOT-01]: `shouldReboot` не объявлен как `volatile`**
+```cpp
+// Текущий код (L47):
 bool shouldReboot = false;
 
-// inside web server callback:
-shouldReboot = true;
+// Должно быть:
+volatile bool shouldReboot = false;
+```
+- `AsyncWebServer` использует FreeRTOS таски на другом ядре (Core 0)
+- Компилятор может кешировать `shouldReboot` в регистре
+- Без `volatile` основной поток может никогда не увидеть изменение
+- **Риск:** Мелвин не перезагружается после сохранения конфига через WebUI
 
-// inside loop():
-if (shouldReboot) {
-    delay(500);
-    ESP.restart();
+---
+
+## 6. Display Redraw во всех состояниях
+
+### 6.1 Карта перерисовок
+
+| Место | Состояния | Механизм |
+|-------|-----------|----------|
+| `loop()` L523–528 | IDLE, RECORDING, CONFIG_AP | Каждые 80мс (`REDRAW_MS`) |
+| `playWavFromSD()` L294–300 | SPEAKING | Каждые 80мс внутри цикла |
+| `setState()` L344–346 | Все | Немедленно при переходе |
+| `connectWifi()` L410–413 | CONNECTING | В цикле ожидания WiFi |
+
+### 6.2 Проблемы перерисовки
+
+**КРИТИЧНО [DISP-01]: STATE_THINKING — дисплей заморожен**
+- `askAI()` — синхронный HTTP-запрос, может длиться 3–15 секунд
+- В это время `loop()` не выполняется, редравов нет
+- Анимация "думающего лица" не воспроизводится
+- **Решение:** Вынести `askAI()` в FreeRTOS task или добавить HTTP progress callback
+
+**КРИТИЧНО [DISP-02]: STATE_SPEAKING — частичный редрав**
+- Редрав есть только внутри `playWavFromSD()` — только пока играет WAV с SD
+- Если `tts.speak()` использует HTTP-стриминг без SD-файла, редрав отсутствует
+- **Решение:** Аналогично — callback редрав или проверить реализацию `MelvinTTS`
+
+**ПРЕДУПРЕЖДЕНИЕ [DISP-03]: CONFIG_AP не имеет анимационного таймера**
+```cpp
+// loop():
+if (currentState == STATE_CONFIG_AP) dnsServer.processNextRequest();
+// ↓
+// Далее: кнопка, shouldReboot, REDRAW...
+```
+- Редрав через `loop()` L523 работает и для CONFIG_AP — **OK**
+- НО: нет VAD-чтения, нет interaction logic — всё ожидание идёт через WebUI
+
+---
+
+## 7. Архитектурные проблемы — Сводная таблица
+
+| ID | Критичность | Описание | Строки |
+|----|-------------|----------|--------|
+| REBOOT-01 | 🔴 КРИТИЧНО | `shouldReboot` не `volatile` | L47 |
+| FSM-01 | 🔴 КРИТИЧНО | `STATE_ERROR` не используется | — |
+| DISP-01 | 🔴 КРИТИЧНО | Дисплей заморожен в STATE_THINKING | L595 |
+| FSM-04 | 🟡 СРЕДНЕ | `switchToTX()` вызывается для STATE_THINKING | L335-337 |
+| WIFI-01 | 🟡 СРЕДНЕ | WiFi мониторинг только в STATE_IDLE | L532 |
+| WIFI-02 | 🟡 СРЕДНЕ | `setAutoReconnect` не сбрасывается в AP-режиме | L390 |
+| INIT-02 | 🟡 СРЕДНЕ | PSRAM fail не переводит в STATE_ERROR | L489 |
+| DISP-02 | 🟡 СРЕДНЕ | Редрав в SPEAKING зависит от реализации TTS | L597 |
+| FSM-02 | 🟢 НИЗКО | STATE_BOOT устанавливается не через setState() | L42 |
+| FSM-03 | 🟢 НИЗКО | loop() не имеет редрава для THINKING/SPEAKING | L523 |
+| INIT-01 | 🟢 НИЗКО | SD fail не логирует невозможность записи | L457 |
+| FSM-05 | ℹ️ ИНФО | switchToRX() timeout=0 — корректно, документировать | L433 |
+
+---
+
+## 8. Конкретные Исправления
+
+### Исправление 1: `volatile shouldReboot` [REBOOT-01]
+
+```cpp
+// main.cpp, строка 47
+// БЫЛО:
+bool shouldReboot = false;
+
+// СТАЛО:
+volatile bool shouldReboot = false;
+```
+
+### Исправление 2: Использовать `WiFi.status()` вместо `wifiConnected` [WIFI-01]
+
+```cpp
+// main.cpp, строки 593, 615
+// БЫЛО:
+if (path.length() > 0 && wifiConnected) {
+
+// СТАЛО:
+if (path.length() > 0 && WiFi.status() == WL_CONNECTED) {
+```
+
+### Исправление 3: `startAPMode()` — сброс auto-reconnect [WIFI-02]
+
+```cpp
+void startAPMode() {
+    WiFi.setAutoReconnect(false);  // ← добавить
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("Melvin-Setup", "melvin123");
+    // ...
 }
+```
+
+### Исправление 4: STATE_ERROR при провале PSRAM [INIT-02, FSM-01]
+
+```cpp
+// main.cpp, строки 489-491
+if (!recorder.begin()) {
+    Serial.println("[SETUP] FATAL: Recorder PSRAM alloc failed!");
+    setState(STATE_ERROR);
+    // Мигание лица ошибки в loop() или бесконечный halt
+    while (true) {
+        drawFace(canvas, STATE_ERROR, millis() / 500);
+        canvas.pushSprite(0, 0);
+        delay(500);
+    }
+}
+```
+
+### Исправление 5: Уточнение setState() для STATE_THINKING [FSM-04]
+
+```cpp
+void setState(RobotState s) {
+    if (currentState == s) return;
+    
+    if (s == STATE_IDLE || s == STATE_RECORDING) {
+        switchToRX();
+    } else if (s == STATE_SPEAKING) {
+        switchToTX();
+    }
+    // STATE_THINKING, STATE_CONNECTING, STATE_CONFIG_AP — I2S не переключаем
+    
+    // ...остальной код...
+}
+```
+
+### Исправление 6: Редрав-callback для STATE_THINKING [DISP-01]
+
+```cpp
+// Добавить тип callback в main.cpp:
+typedef void (*DisplayCallback)(RobotState state, uint32_t tick);
+
+// Передавать в Agent::askAI():
+String answer = agent.askAI(path, configMgr.config, [](RobotState, uint32_t) {
+    uint32_t now = millis();
+    if (now - lastRedrawMs >= REDRAW_MS) {
+        animTick++;
+        drawFace(canvas, STATE_THINKING, animTick);
+        canvas.pushSprite(0, 0);
+        lastRedrawMs = now;
+    }
+});
 ```
 
 ---
 
-## 5. Compliance Check List
+## 9. Config.h — Анализ
 
-| Requirement | Implementation Detail | Compliance Status | Comments |
-|---|---|---|---|
-| **PA_CTRL (GPIO46) LOW at boot** | Initialized as OUTPUT, set to LOW in `setup()`. | **COMPLIANT** | Pin 46 is correctly held LOW. |
-| **PA_CTRL (GPIO46) HIGH only for play** | Driven HIGH in `playWavFromSD`, set to LOW immediately after. | **COMPLIANT** | Follows strapping pin protection rules. |
-| **MCLK active before I2C init** | `i2s_duplex_init()` runs before `initES8311()`, with `delay(200)` for stabilization. | **COMPLIANT** | Essential for ES8311 start. |
-| **I2S TX/RX switching delay** | Calls `delay(10)` between disable and enable. | **COMPLIANT** | Reduces driver strain. |
-| **SD Card 1-bit FAT32 mode** | Runs `SD_MMC.begin("/sdcard", true)`. | **COMPLIANT** | Confirmed 1-bit mode. |
-| **Audio Standard** | 16kHz, 16-bit Mono WAV. | **COMPLIANT** | Meets all VAD/Gemini requirements. |
-| **No delays in audio streaming** | Stream writes block on `portMAX_DELAY` inside I2S queue. | **COMPLIANT** | No `delay()` inside callback/ISR. |
-| **PSRAM Memory Allocations** | Recorder and temporary buffers use `MALLOC_CAP_SPIRAM`. | **PARTIALLY COMPLIANT** | Underlying objects (`String`, `JsonDocument`) spill into SRAM. |
-| **Dual Framework Code** | PlatformIO with raw ESP-IDF `driver/i2s_std.h`. | **COMPLIANT** | Matches standard. |
+### 9.1 Структура
+
+- Корректная JSON-сериализация через ArduinoJson
+- Дефолты в конструкторе `MelvinConfig()` — правильный подход
+- `getEffectivePrompt()` — хорошая инкапсуляция логики промптов
+
+### 9.2 Проблемы
+
+**ПРЕДУПРЕЖДЕНИЕ [CFG-01]: WebUI не отображает `tts_voice`, `rss_url`, `llm_provider`**
+- В `WebUI.h` нет полей для `tts_voice`, `rss_url`, `llm_provider`, `groq_keys`, `openrouter_keys`
+- Поля сохраняются в конфиг через `/api/save`, только если присланы в JSON
+- Если WebUI не отправляет поле — оно перезаписывается дефолтным значением через оператор `|`
+- **Решение:** Добавить поля в WebUI или изменить логику `/api/save` чтобы не перезаписывать незначащие поля
+
+**ПРЕДУПРЕЖДЕНИЕ [CFG-02]: `wifi_pass` никогда не возвращается в `/api/config`**
+```cpp
+// server.on("/api/config"):
+// doc["wifi_pass"] — отсутствует в ответе ✅ (правильно, из соображений безопасности)
+// НО: WebUI не может проверить, установлен ли пароль
+```
+- **Статус:** Приемлемо с точки зрения безопасности
 
 ---
 
-## 6. Summary of Recommended Actions
+## 10. WebUI.h — Анализ
 
-1. **Refactor memory operations in `Agent.h` and `MelvinTTS.h`** to use streaming client writes and reads. This is the single most important fix to prevent heap exhaustion.
-2. **Move I2S RX/TX mode switching to `setState()`** to make state transitions reliable.
-3. **Replace the blocking WiFi reconnect check in `loop()`** with an asynchronous background check.
-4. **Defer `ESP.restart()`** to the main `loop()` to allow WebUI responses to complete.
-5. **Add display drawing ticks during long network calls** to prevent screen freeze during `STATE_THINKING` and `STATE_SPEAKING`.
+### 10.1 Обнаруженные проблемы
+
+**ПРЕДУПРЕЖДЕНИЕ [UI-01]: Заголовок версии несоответствует**
+```html
+<h2>Melvin v7.0 Setup</h2>
+```
+- Указана версия "v7.0" — необходимо синхронизировать с реальной версией прошивки
+
+**ПРЕДУПРЕЖДЕНИЕ [UI-02]: Кнопка SAVE не блокируется после нажатия**
+- Пользователь может нажать SAVE несколько раз, отправив дублирующие запросы
+- **Решение:**
+```javascript
+function save() {
+    document.querySelector('button').disabled = true;  // добавить
+    // ...
+}
+```
+
+**ИНФО [UI-03]: `load()` не сохраняет `tts_voice` из API**
+```javascript
+// load():
+document.getElementById('personality').value = data.personality || 'rick';
+// data.tts_voice — игнорируется, нет поля в UI
+```
+
+---
+
+## 11. Итоговая Оценка Архитектуры
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  ОЦЕНКА СИСТЕМЫ                         │
+├─────────────────────────┬───────────────────────────────┤
+│ Компонент               │ Оценка                        │
+├─────────────────────────┼───────────────────────────────┤
+│ FSM структура           │ ✅ Хорошая, 7 состояний       │
+│ Порядок инициализации   │ ✅ Корректный, все правила    │
+│ PA_CTRL управление      │ ✅ LOW на boot, HIGH в playWav│
+│ I2S Full-Duplex         │ ✅ Элегантное решение         │
+│ WAV Header Parser       │ ✅ Надёжный, без magic offset │
+│ VAD интеграция          │ ✅ VAD_MODE_3, 30мс окна      │
+│ PSRAM для буферов       │ ✅ heap_caps_malloc SPIRAM     │
+│ shouldReboot safety     │ ⚠️  volatile отсутствует      │
+│ WiFi reconnect          │ ⚠️  Мониторинг неполный       │
+│ Display в THINKING      │ ❌ Заморожен                  │
+│ STATE_ERROR             │ ❌ Определён, не используется │
+│ WebUI полнота           │ ⚠️  Не все поля config        │
+└─────────────────────────┴───────────────────────────────┘
+
+ИТОГ: Архитектура работоспособна и профессионально выстроена.
+Критические исправления: 3 (volatile, STATE_ERROR, DISP freeze)
+Рекомендуемые улучшения: 6
+```
+
+---
+
+*Отчёт сгенерирован: 2026-06-05 | Версия анализа: 1.0*

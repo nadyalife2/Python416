@@ -63,8 +63,20 @@ inline void drawRabbitIdle(lgfx::LovyanGFX& d, uint32_t tick) {
     // Статус
     d.setTextColor(COL_CYAN);
     d.setTextSize(1);
-    d.setCursor(72, 232);
-    d.print("[ МЕЛВИН v7.0 ]");
+    
+    // Выводим IP-адрес на экран
+    String ipStr = WiFi.localIP().toString();
+    if (WiFi.status() == WL_CONNECTED && ipStr != "0.0.0.0") {
+        d.setCursor(45, 210);
+        d.print("IP: ");
+        d.print(ipStr.c_str());
+        
+        d.setCursor(55, 232);
+        d.print("[ melvin.local ]");
+    } else {
+        d.setCursor(72, 232);
+        d.print("[ МЕЛВИН v7.0 ]");
+    }
 }
 
 // ----- RECORDING — рот открыт, пульсирующий REC -----

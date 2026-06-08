@@ -1,253 +1,472 @@
-# Technical Audit & Review: LLM Integration & Memory Management
-
-This report provides a detailed code audit and architectural review of the Melvin interactive voice assistant's AI logic, memory management, and configuration system based on [Agent.h](file:///d:/xiaoshi/say-ya/python416/include/Agent.h) and [Config.h](file:///d:/xiaoshi/say-ya/python416/include/Config.h).
-
----
-
-## 1. Current Implementation Analysis
-
-### 1.1 Config.h (Configuration System)
-The configuration is managed by the `ConfigManager` and `MelvinConfig` structures:
-*   **Storage**: Configuration is serialized to and deserialized from `/config.json` on the SD card (`SD_MMC`) in a standard 1-bit mode interface.
-*   **APIs**: It defines strings to hold keys for three providers: `gemini_keys`, `groq_keys`, and `openrouter_keys`.
-*   **Prompt Selection**: The system prompt is dynamically assembled in `getEffectivePrompt()` based on a `personality` setting (`"rick"`, `"calm"`, `"podcast"`, or a custom `system_prompt`), appending the `wake_word`.
-
-### 1.2 Agent.h (AI Pipeline & SD Card History)
-`MelvinAgent` coordinates the core AI interactions:
-*   **History**: It handles dialogue persistence via `appendToHistory` and history retrieval with `getRecentHistory`. It reads the last `maxBytes` (default 2048) of `/history.json` and uses basic string parsing to locate the first valid opening brace `{` of the dialogue objects.
-*   **RSS News**: It scrapes Lenta.ru RSS headlines to provide real-time context to the LLM.
-*   **Key Cascade**: In `askAI()`, the agent splits the comma-separated key string for the chosen provider, trying each key sequentially if the API returns an error.
-*   **Gemini Multimodal API Call**: 
-    *   Reads the recorded WAV file from SD card.
-    *   Allocates a raw buffer in PSRAM using `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`.
-    *   Encodes raw bytes to Base64 via `mbedtls_base64_encode()`, storing the encoded data in a PSRAM buffer (`b64Buf`).
-    *   Constructs a JSON body using the `ArduinoJson` library, adding the prompt context and inline audio data.
-    *   Sends a POST request to `generativelanguage.googleapis.com` using `HTTPClient`.
+# Отчёт: Multi-Provider LLM & Dialog Engineer
+**Файлы:** `include/Agent.h`, `include/Config.h`  
+**Дата:** 2026-06-05  
+**Ревьюер:** Совет Мелвина — Multi-Provider LLM & Dialog Engineer
 
 ---
 
-## 2. Potential Issues & Compliance Gaps
+## 1. callGemini() — GeminiStream (zero-copy streaming)
 
-During the code audit, several critical issues and compliance gaps were identified, categorized by severity below.
+### ✅ СТАТУС: РЕАЛИЗОВАН КОРРЕКТНО
 
-### 2.1 Memory Management & Heap Exhaustion (CRITICAL)
-While raw buffers for recording (`phrase_buf`) and base64 encoding (`b64Buf`) are correctly allocated in PSRAM using `MALLOC_CAP_SPIRAM`, the subsequent transmission steps copy these buffers into the internal DRAM (SRAM), which will crash the system.
+`callGemini()` использует класс `GeminiStream : public Stream` (строки 24–122).
+Аудио **не копируется в String** и **не буферизуется в SRAM**.
 
-```mermaid
-graph TD
-    A[WAV on SD Card ~320KB] -->|Read to PSRAM| B[buf in PSRAM ~320KB]
-    B -->|Base64 Encode| C[b64Buf in PSRAM ~430KB]
-    C -->|String Copy| D[base64Audio in Internal RAM ~430KB]
-    D -->|Add to JSON Doc| E[JsonDocument in Internal RAM ~430KB]
-    E -->|Serialize to String| F[body String in Internal RAM ~440KB]
-    F -->|HTTP POST| G[Wi-Fi Transmission]
-    style D fill:#ffcccc,stroke:#ff3333
-    style E fill:#ffcccc,stroke:#ff3333
-    style F fill:#ffcccc,stroke:#ff3333
+Схема работы:
+```
+SD-файл → readBytesImpl() → base64 по 3 байта → HTTP sendRequest(&gStream, totalLength)
 ```
 
-1.  **DRAM Duplication**: 
-    *   Line 136 of `Agent.h` copies `b64Buf` (in PSRAM) into a standard Arduino `String`:
-        ```cpp
-        String base64Audio = String((char*)b64Buf);
-        ```
-        In ESP32 Arduino, the `String` class allocates memory on the default internal heap (DRAM) using standard `realloc/malloc`. For a 10-second audio recording, `base64Audio` is about 430 KB. Since the ESP32-S3 has only ~320KB of user-accessible DRAM (and usually less than 200KB free at runtime), **this allocation will fail, resulting in an immediate crash or silent failure**.
-    *   Line 159 copies the entire JSON payload into another internal RAM `String`:
-        ```cpp
-        String body; serializeJson(doc, body);
-        ```
-        This duplicates the 430KB base64 audio *again* along with the text prompt, needing another 440KB in DRAM.
+**Как работает GeminiStream:**
+- `jsonStart` / `jsonEnd` — строки-обёртки JSON (малые, на стеке)
+- Аудио кодируется в base64 **побайтово** через `mbedtls_base64_encode()` порциями по 3 байта
+- Никакой промежуточной копии всего base64-тела нет
+- `http.sendRequest("POST", &gStream, totalLength)` — ESP32 HTTPClient читает данные из Stream напрямую
 
-2.  **ArduinoJson Overhead**:
-    *   Adding `base64Audio` to `JsonDocument` creates a third reference or copy in RAM, increasing the memory pressure. 
+> **Замечание (некритично):** `b64Buf[8]` — стековый буфер на 8 символов.
+> `mbedtls_base64_encode` для 3 байт даёт 4 символа + `\0`. Размер 8 — достаточен, но следует добавить assert на случай изменения логики:
+> ```cpp
+> static_assert(sizeof(b64Buf) >= 5, "b64Buf too small");
+> ```
 
-### 2.2 Lack of Provider-Level Cascade (HIGH / Compliance Gap)
-*   **The Issue**: `askAI()` only falls back to the next key *for the same provider* (`cfg.llm_provider`). If all Gemini keys fail, it returns an error and aborts.
-*   **Compliance Violation**: The `AGENTS.md` rules explicitly state:
-    > "Если Gemini 3.5 Flash недоступен, код должен автоматически переключаться на Groq или OpenRouter." (If Gemini 3.5 Flash is unavailable, the code must automatically switch to Groq or OpenRouter).
-*   **API Incompatibility**: The current routing method `callProviderAPI()` returns an error if `cfg.llm_provider` is not `"gemini"`:
-    ```cpp
-    return "Error: " + cfg.llm_provider + " audio input not yet implemented.";
-    ```
-    To support actual failover to Groq or OpenRouter, the system must transcribe the audio first (e.g., using Groq's Whisper API) and then pass the transcribed text to the selected LLM.
+---
 
-### 2.3 Invalid/Malformed History JSON Format (MEDIUM)
-The dialogue history serialization in `appendToHistory` is syntactically broken:
+## 2. Каскад провайдеров: Gemini → Groq → OpenRouter
+
+### ✅ СТАТУС: РЕАЛИЗОВАН, НО ЕСТЬ ПРОБЛЕМА
+
+**Что работает:**
+- `askAI()` (строки 263–303) сначала пробует `primaryProvider` из конфига
+- Затем итерирует массив `{"gemini", "groq", "openrouter"}`, пропуская primary
+- Внутри каждого провайдера — `tryProvider()` перебирает ключи через запятую
+
+**⚠️ ПРОБЛЕМА — Порядок fallback жёстко захардкожен, а не определяется конфигом:**
+
 ```cpp
-void appendToHistory(String role, String text) {
-    File file = SD_MMC.open("/history.json", FILE_APPEND);
-    if (!file) {
-        file = SD_MMC.open("/history.json", FILE_WRITE);
-        file.print("[");
-    } else {
-        file.print(",");
-    }
-    // ... serializeJson(doc, file) ...
-    file.close();
+// Agent.h:281
+String fallbackProviders[] = { "gemini", "groq", "openrouter" };
+```
+
+Если пользователь выставил `llm_provider = "groq"`, порядок fallback будет:
+`groq → gemini → openrouter` (пропускает groq, затем gemini перед openrouter).
+Это может быть нежелательно — пользователь может хотеть `groq → openrouter → gemini`.
+
+**Рекомендация — добавить в `Config.h` поле `llm_fallback_order`:**
+
+```cpp
+// Config.h — добавить в struct MelvinConfig:
+String llm_fallback_order; // e.g. "groq,openrouter" (без primary)
+
+// ConfigManager::load() добавить:
+config.llm_fallback_order = doc["llm_fallback_order"] | "";
+```
+
+```cpp
+// Agent.h — askAI(), заменить жёсткий массив:
+// БЫЛО:
+String fallbackProviders[] = { "gemini", "groq", "openrouter" };
+for (const String& provider : fallbackProviders) { ... }
+
+// СТАЛО:
+const char* defaultOrder[] = { "gemini", "groq", "openrouter" };
+std::vector<String> fallbackList;
+if (cfg.llm_fallback_order.length() > 2) {
+    // Парсим пользовательский порядок
+    int s = 0, e;
+    String ord = cfg.llm_fallback_order;
+    do {
+        e = ord.indexOf(',', s);
+        String p = (e == -1) ? ord.substring(s) : ord.substring(s, e);
+        p.trim();
+        if (p != primaryProvider && p.length() > 2) fallbackList.push_back(p);
+        s = e + 1;
+    } while (e != -1);
+} else {
+    for (auto& p : defaultOrder)
+        if (String(p) != primaryProvider) fallbackList.push_back(p);
+}
+for (const String& provider : fallbackList) { ... }
+```
+
+---
+
+## 3. История диалогов: JSONL на SD-карте
+
+### ✅ СТАТУС: РЕАЛИЗОВАН КОРРЕКТНО
+
+**appendToHistory()** (строки 178–191):
+- Открывает `/history.jsonl` в режиме `FILE_APPEND`
+- Пишет JSON-объект `{"role":"...","content":"..."}` + `println()` (символ `\n`)
+- Файл корректно закрывается
+
+**getRecentHistory()** (строки 193–234):
+- Читает хвост файла (`maxBytes=2048` по умолчанию)
+- Выравнивает по первому `\n` — не читает оборванные записи
+- Формирует JSON-массив `[{...},{...}]` для контекста промпта
+
+**⚠️ ПРОБЛЕМА #1 — `file.readString()` на 2048 байт в SRAM:**
+
+```cpp
+// строка 201
+String lastChunk = file.readString(); // до 2048 байт в обычном heap!
+```
+
+`String` в Arduino хранится в обычном SRAM. 2048 байт — пограничный случай, но при частом вызове
+и фрагментации heap возможен OOM. Рекомендуется:
+
+```cpp
+// БЫЛО:
+String lastChunk = file.readString();
+
+// СТАЛО (читаем только нужный хвост):
+size_t toRead = (size > maxBytes) ? maxBytes : size;
+char* rawBuf = (char*)heap_caps_malloc(toRead + 1, MALLOC_CAP_SPIRAM);
+if (!rawBuf) { file.close(); return ""; }
+file.read((uint8_t*)rawBuf, toRead);
+rawBuf[toRead] = '\0';
+String lastChunk = String(rawBuf);  // копия в SRAM, но исходный буфер в PSRAM
+heap_caps_free(rawBuf);
+```
+
+**⚠️ ПРОБЛЕМА #2 — Отсутствует ротация файла истории:**
+
+Файл `/history.jsonl` растёт бесконечно. На SD-карте это не критично, но возможно
+замедление `file.seek()` на больших файлах FAT32. Рекомендуется добавить ограничение:
+
+```cpp
+void trimHistoryIfNeeded(size_t maxFileBytes = 512 * 1024) {
+    if (!SD_MMC.exists("/history.jsonl")) return;
+    File f = SD_MMC.open("/history.jsonl", FILE_READ);
+    if (!f) return;
+    size_t sz = f.size();
+    f.close();
+    if (sz < maxFileBytes) return;
+
+    // Переименовываем старый в .bak, начинаем новый
+    SD_MMC.remove("/history.jsonl.bak");
+    SD_MMC.rename("/history.jsonl", "/history.jsonl.bak");
+    Serial.println("[AGENT] History rotated.");
 }
 ```
-*   **Format Breakdown**: The opening bracket `[` is printed when the file is created, and elements are separated by commas. However, **the closing bracket `]` is never appended**. This makes `/history.json` an invalid JSON file.
-*   **Fragile Parser**: `getRecentHistory()` reads the last 2048 bytes of the file and searches for the first `{`. While this acts as a quick workaround to read the most recent messages, it will break if the model's text response itself contains braces (e.g., code snippets, markdown notation, JSON examples).
-*   **Infinite Growth**: The file grows indefinitely. Over time, appending and seeking on a massive file will degrade SD card read/write speeds, triggering watchdog timeouts.
 
-### 2.4 Unsafe API Response Parsing (MEDIUM)
-In `callGemini()` (lines 167-168):
+**⚠️ ПРОБЛЕМА #3 — `first` флаг не сбрасывается правильно:**
+
 ```cpp
-JsonDocument res; deserializeJson(res, resp);
-String answer = res["candidates"][0]["content"]["parts"][0]["text"].as<String>();
+// строки 208-228: переменная `first` инициализирована true,
+// но сбрасывается только ПОСЛЕ вставки строки в formatted.
+// При первой непустой строке `first` остаётся true → запятая не ставится. Логика верна.
+// ОДНАКО: если после первой строки нет '\n' — цикл while завершится через break (строка 219),
+// и `first` не сбросится — это не баг, но код неочевиден. Рекомендуется упростить.
 ```
-*   If `deserializeJson()` fails (due to connection reset or truncated response) or if the API returns a response without candidates (e.g., due to content safety blocks or parsing errors), indexing into `res["candidates"][0]` will result in a null reference or empty string without proper error handling.
 
 ---
 
-## 3. Proposed Fixes & Architectural Enhancements
+## 4. Аллокация буферов — проверка PSRAM
 
-### 3.1 Zero-Copy JSON Streaming to HTTP Client (Resolves 2.1)
-Instead of serializing the entire JSON payload (including the massive base64 string) into an internal RAM `String`, we can stream the JSON structure directly to the server chunk-by-chunk. This keeps the base64 string solely inside PSRAM and avoids all internal RAM allocations.
+### ⚠️ СТАТУС: ЧАСТИЧНО СООТВЕТСТВУЕТ ТРЕБОВАНИЯМ
 
-Here is a proposed implementation for `callGemini` using chunked transmission:
+| Буфер | Где | Размер | В PSRAM? | Оценка |
+|---|---|---|---|---|
+| `b64Buf[8]` | GeminiStream, стек | 8 байт | Нет (стек) | ✅ ОК |
+| `rawBuf[3]` | GeminiStream, стек | 3 байта | Нет (стек) | ✅ ОК |
+| `jsonStart` String | callGemini(), SRAM heap | ~200–500 байт | Нет | ✅ ОК (мало) |
+| `jsonEnd` String | callGemini(), SRAM heap | ~20 байт | Нет | ✅ ОК |
+| `headerStr` String | callGemini(), SRAM heap | ~200–500 байт | Нет | ✅ ОК |
+| `resp` String | callGemini() строка 400 | **до 8–16KB** | ❌ НЕТ | ⚠️ РИСК |
+| `body` String | callGroqChat() строка 482 | ~1–3KB | Нет | ⚠️ Умеренный |
+| `body` String | callOpenRouterChat() строка 515 | ~1–3KB | Нет | ⚠️ Умеренный |
+| `lastChunk` String | getRecentHistory() строка 201 | до 2048 байт | ❌ НЕТ | ⚠️ РИСК |
+| `payload` String | getRSSHeadlines() строка 244 | **до 64KB** | ❌ НЕТ | 🔴 КРИТИЧНО |
+| `formatted` String | getRecentHistory() строка 207 | до 2048 байт | ❌ НЕТ | ⚠️ РИСК |
+
+### 🔴 КРИТИЧЕСКАЯ ПРОБЛЕМА — `getRSSHeadlines()` RSS payload в SRAM:
 
 ```cpp
-// Direct socket/client streaming to bypass internal RAM allocation
-WiFiClientSecure client;
-client.setInsecure();
-HTTPClient http;
-http.setTimeout(30000);
-http.begin(client, "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + key);
-http.addHeader("Content-Type", "application/json");
-
-// Define parts of the JSON
-String prompt = cfg.getEffectivePrompt() + "\n\nNEWS:\n" + news + "\n\nRECENT CONTEXT:\n" + history;
-
-// Escape prompt for JSON manually or with a mini JsonDocument
-JsonDocument headerDoc;
-headerDoc["contents"][0]["role"] = "user";
-headerDoc["contents"][0]["parts"][0]["text"] = prompt;
-String headerStr;
-serializeJson(headerDoc, headerStr);
-
-// Split headerStr at the end of the text part to insert inline_data
-// headerStr is small (~2KB), so this is completely safe for DRAM.
-int insertPos = headerStr.lastIndexOf("}]}");
-String jsonStart = headerStr.substring(0, insertPos) + ",{\"inline_data\":{\"mime_type\":\"audio/wav\",\"data\":\"";
-String jsonEnd = "\"}}]}";
-
-// Compute total content length to avoid chunked transfer-encoding if not supported
-size_t totalLength = jsonStart.length() + b64Len + jsonEnd.length();
-http.addHeader("Content-Length", String(totalLength));
-
-// Perform POST with a custom stream or manual payload write
-// Using the custom print interface to send data directly without copying buffers
-int code = http.POST((uint8_t*)nullptr, 0); // Open connection
-// Send data parts directly
-WiFiClient* stream = http.getStreamPtr();
-if (stream) {
-    stream->print(jsonStart);
-    // Write the Base64 buffer directly from PSRAM (zero-copy)
-    stream->write((const uint8_t*)b64Buf, b64Len);
-    stream->print(jsonEnd);
-}
+// строка 244 — RSS XML может быть 50-100KB!
+String payload = http.getString(); // → обычный SRAM → OOM crash
 ```
 
-### 3.2 Dual-Stage Provider Cascade (Resolves 2.2)
-Refactor `askAI` to fallback not just to the next key, but to the next **provider** if all keys of the current provider fail.
+**Исправление:**
 
 ```cpp
-String askAI(const String& audioPath, const MelvinConfig& cfg) {
-    // Array of fallback providers in order
-    String providers[] = { cfg.llm_provider, "gemini", "groq", "openrouter" };
-    
-    for (const String& currentProvider : providers) {
-        String keys = (currentProvider == "gemini") ? cfg.gemini_keys : 
-                     (currentProvider == "groq") ? cfg.groq_keys : cfg.openrouter_keys;
-                     
-        if (keys.length() < 5) continue; // Skip if no keys are configured
+String getRSSHeadlines(String url) {
+    if (url.length() < 5) return "No news configured.";
+    HTTPClient http;
+    http.begin(url);
+    int httpCode = http.GET();
+    String headlines = "";
+    if (httpCode == HTTP_CODE_OK) {
+        // Получаем Stream вместо копирования всего в String
+        WiFiClient* stream = http.getStreamPtr();
+        const size_t BUF_SIZE = 4096;
+        char* buf = (char*)heap_caps_malloc(BUF_SIZE, MALLOC_CAP_SPIRAM);
+        if (!buf) { http.end(); return ""; }
         
-        int start = 0;
-        int end = keys.indexOf(',');
-        while (true) {
-            String currentKey = (end == -1) ? keys.substring(start) : keys.substring(start, end);
-            currentKey.trim();
-            
-            // Execute request using the selected provider
-            String result = callProviderAPI(audioPath, currentProvider, cfg, currentKey);
-            if (!result.startsWith("Error API") && !result.startsWith("Error: Unsupported")) {
-                appendToHistory("user", "[Voice Input]");
-                appendToHistory("model", result);
-                return result;
+        String accum = "";
+        int count = 0;
+        int available;
+        while ((available = stream->available()) && count < 5) {
+            size_t toRead = min((size_t)available, BUF_SIZE - 1);
+            size_t n = stream->readBytes(buf, toRead);
+            buf[n] = '\0';
+            accum += String(buf);
+            // Парсим заголовки из накопленного
+            int pos = 0;
+            while ((pos = accum.indexOf("<title>", pos)) != -1 && count < 5) {
+                int end = accum.indexOf("</title>", pos);
+                if (end == -1) break; // неполный тег — ждём следующего чанка
+                String title = accum.substring(pos + 7, end);
+                if (title.indexOf("Lenta") == -1) {
+                    headlines += "- " + title + "\n";
+                    count++;
+                }
+                pos = end;
             }
-            
-            if (end == -1) break;
-            start = end + 1;
-            end = keys.indexOf(',', start);
+            // Обрезаем уже обработанное начало accum
+            int lastTitle = accum.lastIndexOf("<title>");
+            if (lastTitle > 0) accum = accum.substring(lastTitle);
         }
+        heap_caps_free(buf);
     }
-    return "Error: All keys and fallback providers failed.";
+    http.end();
+    return headlines;
 }
 ```
 
-### 3.3 Implementing Transcription (STT) for Groq/OpenRouter Fallbacks
-To support Groq and OpenRouter, add a Whisper transcribing client inside `callProviderAPI`:
+### ⚠️ ПРОБЛЕМА — `resp = http.getString()` в callGemini():
+
 ```cpp
-String callProviderAPI(const String& audioPath, const String& provider, const MelvinConfig& cfg, String key) {
-    if (provider == "gemini") {
-        return callGemini(audioPath, getRSSHeadlines(cfg.rss_url), getRecentHistory(), cfg, key);
-    }
-    
-    // Fallback: Transcribe audio to text via Groq/OpenRouter Whisper API first
-    String transcribedText = transcribeAudioWhisper(audioPath, key);
-    if (transcribedText.startsWith("Error")) {
-        return "Error API Whisper Transcription failed";
-    }
-    
-    // Query text LLM
-    if (provider == "groq") {
-        return callGroqText(transcribedText, key);
-    } else if (provider == "openrouter") {
-        return callOpenRouterText(transcribedText, key);
-    }
-    
-    return "Error: Unsupported provider " + provider;
-}
+// строка 400 — ответ Gemini может быть 4–16KB
+String resp = http.getString();
 ```
 
-### 3.4 Shifting from Broken JSON Array to JSON Lines (JSONL) (Resolves 2.3)
-Instead of maintaining an open-ended JSON array (`[...]`), write the history file in the **JSON Lines (JSONL)** format.
-*   **Format**: Each dialogue exchange is a single-line JSON object followed by a newline `\n`.
-*   **Advantages**: 
-    1.  Appending is a clean write operation: `serializeJson(doc, file); file.println();`.
-    2.  No need for brackets (`[` or `]`) or tracking separating commas.
-    3.  Parsing is highly robust: we can seek backwards, grab the last few lines, and deserialize each line independently.
-    4.  Capping file size (e.g., removing the oldest lines once the file exceeds 100 lines) becomes straightforward.
+**Исправление — десериализовать прямо из Stream:**
 
 ```cpp
-void appendToHistoryJSONL(String role, String text) {
-    File file = SD_MMC.open("/history.jsonl", FILE_APPEND);
-    if (!file) return;
-    
-    JsonDocument doc;
-    doc["role"] = role;
-    doc["content"] = text;
-    serializeJson(doc, file);
-    file.println(); // Newline separator
-    file.close();
+// БЫЛО:
+String resp = http.getString();
+JsonDocument res;
+DeserializationError err = deserializeJson(res, resp);
+
+// СТАЛО (zero-copy, без String):
+JsonDocument res;
+WiFiClient* stream = http.getStreamPtr();
+DeserializationError err = deserializeJson(res, *stream);
+// resp больше не нужен — не выделяем String вообще
+```
+
+Аналогично применить в `callGroqChat()` (строка 487) и `callOpenRouterChat()` (строка 520).
+
+---
+
+## 5. Таймаут HTTP
+
+### ✅ СТАТУС: ЧАСТИЧНО — только callGemini()
+
+```cpp
+// callGemini() строка 387:
+http.setTimeout(30000); // ✅ 30 секунд
+```
+
+**❌ ПРОБЛЕМА — Остальные клиенты не устанавливают таймаут:**
+
+| Метод | setTimeout()? | Умолчание |
+|---|---|---|
+| `callGemini()` | ✅ `30000ms` | — |
+| `transcribeGroqWhisper()` | ❌ НЕТ | 5000ms (по умолч.) |
+| `callGroqChat()` | ❌ НЕТ | 5000ms (по умолч.) |
+| `callOpenRouterChat()` | ❌ НЕТ | 5000ms (по умолч.) |
+| `getRSSHeadlines()` | ❌ НЕТ | 5000ms (по умолч.) |
+
+**Исправление — добавить во все HTTP-клиенты:**
+
+```cpp
+// transcribeGroqWhisper() — после http.begin():
+http.setTimeout(30000);
+
+// callGroqChat() — после http.begin():
+http.setTimeout(30000);
+
+// callOpenRouterChat() — после http.begin():
+http.setTimeout(30000);
+
+// getRSSHeadlines() — после http.begin():
+http.setTimeout(10000); // RSS быстрее — 10 сек достаточно
+```
+
+---
+
+## 6. Groq Whisper Fallback для транскрипции
+
+### ✅ СТАТУС: РЕАЛИЗОВАН КОРРЕКТНО
+
+`transcribeGroqWhisper()` (строки 425–464):
+- Использует `MultipartStream : public Stream` — zero-copy streaming WAV-файла
+- Модель: `whisper-large-v3-turbo` — актуальная быстрая модель
+- Multipart boundary: `----MelvinBoundary123456789`
+- Content-Length явно устанавливается (`http.addHeader("Content-Length", ...)`)
+- Правильно парсит `doc["text"]` из JSON-ответа
+
+**⚠️ ПРОБЛЕМА — `MultipartStream::read()` вызывает `drawFace()` внутри цикла:**
+
+```cpp
+// строка 147-156: drawFace() вызывается при КАЖДОМ вызове read()!
+int read() override {
+    uint32_t now = millis();
+    if (now - lastRedrawMs >= 80) {
+        animTick++;
+        drawFace(canvas, currentState, animTick);
+        canvas.pushSprite(0, 0);
+        lastRedrawMs = now;
+    }
+    ...
+```
+
+Метод `read()` вызывается HTTPClient для каждого байта данных.
+`drawFace()` + `pushSprite()` — дорогостоящие операции на SPI дисплее.
+Хотя throttle через `lastRedrawMs >= 80` смягчает проблему, это всё равно
+создаёт джиттер в потоке данных. В `GeminiStream` эта логика вынесена в `readBytesImpl()`,
+что правильнее.
+
+**Рекомендация** — перенести redraw из `read()` в `readBytes()` (добавить метод `readBytes` в `MultipartStream`):
+
+```cpp
+class MultipartStream : public Stream {
+    // ... существующие поля ...
+
+    size_t readBytesImpl(uint8_t* buf, size_t len) {
+        // Redraw throttle — здесь, а не в read()
+        uint32_t now = millis();
+        if (now - lastRedrawMs >= 80) {
+            animTick++;
+            drawFace(canvas, currentState, animTick);
+            canvas.pushSprite(0, 0);
+            lastRedrawMs = now;
+        }
+        size_t bytesRead = 0;
+        while (bytesRead < len && streamPos < totalLen) {
+            if (streamPos < header.length()) {
+                buf[bytesRead++] = header[streamPos++];
+                continue;
+            }
+            size_t fileEnd = header.length() + fileSize;
+            if (streamPos < fileEnd) {
+                buf[bytesRead++] = file.read();
+                streamPos++;
+                continue;
+            }
+            if (streamPos < totalLen) {
+                buf[bytesRead++] = footer[streamPos++ - fileEnd];
+            }
+        }
+        return bytesRead;
+    }
+
+public:
+    int read() override {
+        uint8_t c;
+        return (readBytesImpl(&c, 1) == 1) ? c : -1;
+    }
+
+    size_t readBytes(char* buf, size_t len) override {
+        return readBytesImpl((uint8_t*)buf, len);
+    }
+    size_t readBytes(uint8_t* buf, size_t len) override {
+        return readBytesImpl(buf, len);
+    }
+    // ... остальное без изменений ...
+};
+```
+
+---
+
+## 7. Дополнительные проблемы
+
+### ⚠️ Неверное имя модели Gemini (строка 389)
+
+```cpp
+// ТЕКУЩЕЕ:
+"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=" + key
+```
+
+Модели `gemini-3.5-flash` **не существует**. Актуальные имена на 2026-06:
+- `gemini-2.5-flash` (рекомендуется)
+- `gemini-2.0-flash`
+
+**Исправление:**
+```cpp
+// СТАЛО:
+"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + key
+```
+
+Рекомендуется вынести имя модели в `Config.h`:
+```cpp
+// MelvinConfig:
+String gemini_model;  // default: "gemini-2.5-flash"
+String groq_model;    // default: "llama-3.3-70b-versatile"
+String openrouter_model; // default: "meta-llama/llama-3-8b-instruct:free"
+
+// MelvinConfig конструктор:
+gemini_model = "gemini-2.5-flash";
+groq_model = "llama-3.3-70b-versatile";
+openrouter_model = "meta-llama/llama-3-8b-instruct:free";
+```
+
+### ⚠️ OpenRouter провайдер не устанавливает `HTTP-Referer` заголовок
+
+OpenRouter требует для идентификации:
+```cpp
+http.addHeader("HTTP-Referer", "https://melvin-robot.local");
+http.addHeader("X-Title", "Melvin Robot");
+```
+Без этого запросы могут отклоняться или получать низкий приоритет.
+
+### ℹ️ Groq API endpoint устарел (строка 433)
+
+```cpp
+// ТЕКУЩЕЕ:
+http.begin(client, "https://api.groq.com/v1/audio/transcriptions");
+// Официальный: openai-compat endpoint
+// АКТУАЛЬНО:
+http.begin(client, "https://api.groq.com/openai/v1/audio/transcriptions");
+```
+
+Аналогично для Groq Chat (строка 471):
+```cpp
+// ТЕКУЩЕЕ:
+http.begin(client, "https://api.groq.com/v1/chat/completions");
+// СТАЛО:
+http.begin(client, "https://api.groq.com/openai/v1/chat/completions");
+```
+
+### ℹ️ Config.h — отсутствует проверка валидности конфига
+
+```cpp
+// Рекомендуется добавить в MelvinConfig:
+bool isValid() const {
+    if (wifi_ssid.length() < 2) return false;
+    // Хотя бы один провайдер должен иметь ключ
+    return (gemini_keys.length() > 5 || groq_keys.length() > 5 || openrouter_keys.length() > 5);
 }
 ```
 
 ---
 
-## 4. Compliance Checklist
+## Итоговая сводка
 
-The following table reviews the current implementation against the hardware and design rules specified in `AGENTS.md` and `GEMINI.md`:
+| Проверка | Статус | Приоритет |
+|---|---|---|
+| GeminiStream zero-copy | ✅ Реализован | — |
+| Каскад провайдеров | ✅ Работает / ⚠️ Порядок хардкожен | Средний |
+| История JSONL на SD | ✅ Корректно / ⚠️ Нет ротации | Низкий |
+| Буферы в PSRAM | ⚠️ RSS payload в SRAM (критично) | **Высокий** |
+| Таймаут HTTP >= 30000ms | ❌ Только в callGemini() | **Высокий** |
+| Groq Whisper fallback | ✅ Реализован корректно | — |
+| Groq API endpoints | ❌ Устаревшие `/v1/` вместо `/openai/v1/` | **Высокий** |
+| Имя модели Gemini | ❌ `gemini-3.5-flash` не существует | **Критично** |
+| OpenRouter заголовки | ⚠️ Отсутствуют `HTTP-Referer` / `X-Title` | Средний |
+| MultipartStream redraw | ⚠️ drawFace() в read() вместо readBytes() | Средний |
 
-| Requirement / Rule | Source | Status | Comments |
-| :--- | :--- | :--- | :--- |
-| **PA_CTRL (GPIO46) LOW on boot** | `AGENTS.md` | **Compliant** | Set as `OUTPUT` and written `LOW` at start of `setup()`. |
-| **PA_CTRL HIGH only during I2S TX** | `AGENTS.md` | **Compliant** | Enabled before playing WAV, set `LOW` immediately after. |
-| **MCLK active before I2C init** | `AGENTS.md` | **Compliant** | `i2s_duplex_init()` runs before `initES8311()`. |
-| **Switch I2S RX/TX with disable/delay** | `AGENTS.md` | **Compliant** | Implemented using a 10ms delay in `switchToRX()` / `switchToTX()`. |
-| **SD card in 1-bit mode (FAT32)** | `AGENTS.md` | **Compliant** | Configured with `SD_MMC.begin("/sdcard", true)`. |
-| **Audio Standard (16kHz / 16-bit / Mono)** | `AGENTS.md` | **Compliant** | Followed in `Recorder.h` and explicitly set in Google TTS request. |
-| **Audio/Base64 Buffers in PSRAM** | `AGENTS.md` | **Compliant** | Used correctly for raw buffers (`phrase_buf`, `b64Buf`, `decoded`). |
-| **Automatic Provider Fallback** | `AGENTS.md` | **Non-Compliant** | **Missing.** Code does not switch to Groq/OpenRouter on Gemini failure. |
-| **ES8311 Working Registers** | `GEMINI.md` | **Compliant** | Volume, Routing, and Output Gain registers set properly in `initES8311()`. |
+---
+
+*Отчёт сформирован советом Мелвина, роль: Multi-Provider LLM & Dialog Engineer*
