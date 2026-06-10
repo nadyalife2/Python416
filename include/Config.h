@@ -90,10 +90,7 @@ public:
             config.llm_provider = (config.groq_keys.length() > 5) ? "groq" :
                                   (config.openrouter_keys.length() > 5) ? "openrouter" : "groq";
         }
-        if (config.tts_provider == "google") {
-            Serial.println("[CONFIG] Auto-migrating tts_provider: google -> none (requires OAuth)");
-            config.tts_provider = "none";
-        }
+
         return true;
     }
 

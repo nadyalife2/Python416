@@ -259,9 +259,9 @@ private:
 
         // ElevenLabs voice_id: default to "21m00Tcm4TlvDq8ikWAM" (Rachel) if not specified
         String voiceId = (cfg.tts_voice.length() > 0) ? cfg.tts_voice : "21m00Tcm4TlvDq8ikWAM";
-        String url = "https://api.elevenlabs.io/v1/text-to-speech/" + voiceId;
+        String url = "https://api.elevenlabs.io/v1/text-to-speech/" + voiceId + "?output_format=pcm_16000";
         if (cfg.api_proxy.length() > 0) {
-            url = cfg.api_proxy + "/elevenlabs-tts/v1/text-to-speech/" + voiceId;
+            url = cfg.api_proxy + "/elevenlabs-tts/v1/text-to-speech/" + voiceId + "?output_format=pcm_16000";
             if (url.startsWith("https://")) {
                 secureClient.setInsecure();
                 http.begin(secureClient, url);
@@ -288,12 +288,12 @@ private:
 
         if (code == 200) {
             WiFiClient& stream = http.getStream();
-            bool success = writeStreamToFile(stream, "/resp.mp3");
+            bool success = writeLpcmToWav(stream, "/resp.wav", 16000);
             if (success) {
-                Serial.println("[TTS][ElevenLabs] MP3 saved to /resp.mp3 successfully. Playback is not supported yet, playing fallback WAV.");
-                speakRandomPhrase();
+                Serial.println("[TTS][ElevenLabs] Saved, playing...");
+                playWavFromSD("/resp.wav");
             } else {
-                Serial.println("[TTS][ElevenLabs] Failed to save stream to /resp.mp3!");
+                Serial.println("[TTS][ElevenLabs] Stream write failed!");
                 if (SD_MMC.exists("/error.wav")) {
                     playWavFromSD("/error.wav");
                 }

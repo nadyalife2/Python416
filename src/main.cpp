@@ -951,7 +951,7 @@ void loop() {
             Serial.println("[BUTTON] Manual recording triggered!");
             recorder.startRecording();
             recStartMs = now;
-            silenceStartMs = now;
+            silenceStartMs = now + 1000;
             setState(STATE_RECORDING);
             return;
         }
@@ -969,7 +969,7 @@ void loop() {
                         Serial.println("[VAD] Speech detected!");
                         recorder.startRecording();
                         recStartMs = now;
-                        silenceStartMs = now;
+                        silenceStartMs = now + 1000;
                         setState(STATE_RECORDING);
                     }
                     s_vad_buf_idx = 0;
@@ -987,7 +987,7 @@ void loop() {
         if (phrase_buf && (current_frames - vad_processed_frames >= 480)) {
             int16_t* frame_ptr = &phrase_buf[vad_processed_frames];
             if (vad_process(vad_inst, frame_ptr, SAMPLE_RATE, 30) == VAD_SILENCE) {
-                if (now - silenceStartMs > 1500) { // 1.5 seconds of silence
+                if (now > silenceStartMs && now - silenceStartMs > 1500) { // 1.5 seconds of silence
                     Serial.println("[VAD] Silence detected → stop");
                     String path = recorder.stopAndSave();
                     

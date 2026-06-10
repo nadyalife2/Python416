@@ -396,18 +396,47 @@ public:
         int httpCode = http.GET();
         String headlines = "";
         if (httpCode == HTTP_CODE_OK) {
-            String payload = http.getString();
-            int count = 0, pos = 0;
-            while ((pos = payload.indexOf("<title>", pos)) != -1 && count < 5) {
-                int end = payload.indexOf("</title>", pos);
-                if (end != -1) {
-                    String title = payload.substring(pos + 7, end);
-                    if (title.indexOf("Lenta") == -1) {
-                        headlines += "- " + title + "\n";
-                        count++;
+            WiFiClient& stream = http.getStream();
+            const size_t bufSize = 2048;
+            uint8_t* buf = nullptr;
+            if (psramFound()) {
+                buf = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            }
+            if (!buf) {
+                buf = (uint8_t*)malloc(bufSize);
+            }
+            if (buf) {
+                String payload = "";
+                uint32_t startMs = millis();
+                while (millis() - startMs < 10000) {
+                    int avail = stream.available();
+                    if (avail > 0) {
+                        size_t toRead = min((size_t)avail, bufSize - 1);
+                        size_t r = stream.readBytes(buf, toRead);
+                        buf[r] = 0;
+                        payload += (char*)buf;
+                        startMs = millis();
+                        if (payload.length() > 20000) break;
+                    } else if (!stream.connected()) {
+                        break;
+                    } else {
+                        delay(10);
                     }
-                    pos = end;
-                } else break;
+                }
+                free(buf);
+
+                int count = 0, pos = 0;
+                while ((pos = payload.indexOf("<title>", pos)) != -1 && count < 5) {
+                    int end = payload.indexOf("</title>", pos);
+                    if (end != -1) {
+                        String title = payload.substring(pos + 7, end);
+                        if (title.indexOf("Lenta") == -1) {
+                            headlines += "- " + title + "\n";
+                            count++;
+                        }
+                        pos = end;
+                    } else break;
+                }
             }
         }
         http.end();
@@ -879,18 +908,11 @@ private:
         return result;
     }
 
-    // --- OPENROUTER WHISPER STT CLIENT (Stream-Based JSON base64) ---
+    // --- OPENROUTER WHISPER STT CLIENT (Stream-Based multipart) ---
     String transcribeOpenRouter(const String& audioPath, const String& key, const MelvinConfig& cfg) {
         File file = SD_MMC.open(audioPath, FILE_READ);
         if (!file) return "Error: Open audio failed";
         size_t fileSize = file.size();
-
-        size_t b64Len = ((fileSize + 2) / 3) * 4;
-
-        String jsonStart = "{\"model\":\"openai/whisper-1\",\"input_audio\":{\"format\":\"wav\",\"data\":\"";
-        String jsonEnd = "\"}}";
-
-        size_t totalLength = jsonStart.length() + b64Len + jsonEnd.length();
 
         String result;
         {
@@ -919,10 +941,22 @@ private:
             }
             http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
             http.addHeader("Authorization", "Bearer " + key);
-            http.addHeader("Content-Type", "application/json");
 
-            GeminiStream gStream(file, jsonStart, jsonEnd);
-            int code = http.sendRequest("POST", &gStream, totalLength);
+            String boundary = "----MelvinBoundary7731";
+            http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+            String header = "--" + boundary + "\r\n" +
+                            "Content-Disposition: form-data; name=\"model\"\r\n\r\n" +
+                            "openai/whisper-1\r\n" +
+                            "--" + boundary + "\r\n" +
+                            "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n" +
+                            "Content-Type: audio/wav\r\n\r\n";
+            String footer = "\r\n--" + boundary + "--\r\n";
+
+            size_t totalLength = header.length() + fileSize + footer.length();
+
+            MultipartStream mpStream(file, header, footer);
+            int code = http.sendRequest("POST", &mpStream, totalLength);
             file.close();
 
             Serial.printf("[AGENT] OpenRouter STT HTTP response: %d\n", code);
