@@ -13,3 +13,9 @@ node_modules
 Thumbs.db
 __pycache__/
 *.pyc
+
+# Scratch directory ignores
+scratch/test_keys.py
+scratch/*.bin
+scratch/*.log
+scratch/*.txt

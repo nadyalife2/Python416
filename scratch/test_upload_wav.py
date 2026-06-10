@@ -4,7 +4,7 @@ import sys
 import os
 
 def test_upload():
-    url = "https://throbbing-snowflake-5897.hollabaughcahoon.workers.dev/groq/openai/v1/audio/transcriptions"
+    url = "http://127.0.0.1:8080/groq/openai/v1/audio/transcriptions"
     
     # Create 100KB of dummy WAV data
     wav_data = b"RIFF" + b"\x00" * (100 * 1024)

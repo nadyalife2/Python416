@@ -36,15 +36,6 @@ private:
     size_t b64CacheIdx = 0;
 
     size_t readBytesImpl(uint8_t* buffer, size_t length) {
-        // Redraw screen periodically to prevent visual freezes
-        uint32_t now = millis();
-        if (now - lastRedrawMs >= 80) {
-            animTick++;
-            drawFace(canvas, currentState, animTick);
-            canvas.pushSprite(0, 0);
-            lastRedrawMs = now;
-        }
-
         size_t bytesRead = 0;
         while (bytesRead < length && streamPos < totalLength) {
             // 1. JSON Start
@@ -77,6 +68,7 @@ private:
                     buffer[bytesRead++] = b64Buf[b64CacheIdx++];
                     streamPos++;
                 } else {
+                    Serial.printf("[DEBUG] GeminiStream file.read returned 0! streamPos=%d, b64End=%d\n", streamPos, b64End);
                     break;
                 }
                 continue;
@@ -101,9 +93,7 @@ public:
         size_t b64Len = ((fileSize + 2) / 3) * 4;
         totalLength = jsonStart.length() + b64Len + jsonEnd.length();
         
-        if (psramFound()) {
-            rawBuf = (uint8_t*)heap_caps_malloc(768, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        }
+        rawBuf = (uint8_t*)heap_caps_malloc(768, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
         if (!rawBuf) rawBuf = (uint8_t*)malloc(768);
         
         if (psramFound()) {
@@ -163,15 +153,6 @@ public:
 
     // Efficient bulk read — HTTPClient uses this for sendRequest()
     size_t readBytes(uint8_t* buf, size_t len) override {
-        // Periodic screen redraw during long transfers
-        uint32_t now = millis();
-        if (now - lastRedrawMs >= 80) {
-            animTick++;
-            drawFace(canvas, currentState, animTick);
-            canvas.pushSprite(0, 0);
-            lastRedrawMs = now;
-        }
-
         size_t got = 0;
         while (got < len && streamPos < totalLen) {
             size_t hLen = header.length();
@@ -186,8 +167,14 @@ public:
             } else if (streamPos < fileEnd) {
                 // Region 2: WAV file data
                 size_t chunk = min(len - got, fileEnd - streamPos);
-                size_t r = file.read(buf + got, chunk);
-                if (r == 0) break;
+                if (chunk > 1024) chunk = 1024;
+                alignas(4) uint8_t temp[1024];
+                size_t r = file.read(temp, chunk);
+                if (r == 0) {
+                    Serial.printf("[DEBUG] MultipartStream file.read returned 0! streamPos=%d, fileEnd=%d, chunk=%d\n", streamPos, fileEnd, chunk);
+                    break;
+                }
+                memcpy(buf + got, temp, r);
                 streamPos += r;
                 got += r;
             } else {
@@ -241,20 +228,14 @@ public:
     }
 
     size_t readBytes(uint8_t* buf, size_t len) override {
-        // Periodic screen redraw during long transfers
-        uint32_t now = millis();
-        if (now - lastRedrawMs >= 80) {
-            animTick++;
-            drawFace(canvas, currentState, animTick);
-            canvas.pushSprite(0, 0);
-            lastRedrawMs = now;
-        }
-
         size_t got = 0;
         while (got < len && streamPos < totalLen) {
             size_t chunk = min(len - got, totalLen - streamPos);
-            size_t r = file.read(buf + got, chunk);
+            if (chunk > 1024) chunk = 1024;
+            alignas(4) uint8_t temp[1024];
+            size_t r = file.read(temp, chunk);
             if (r == 0) break;
+            memcpy(buf + got, temp, r);
             streamPos += r;
             got += r;
         }
@@ -289,13 +270,6 @@ public:
         }
     }
     size_t write(uint8_t c) override {
-        uint32_t now = millis();
-        if (now - lastRedrawMs >= 80) {
-            animTick++;
-            drawFace(canvas, currentState, animTick);
-            canvas.pushSprite(0, 0);
-            lastRedrawMs = now;
-        }
         if (_writePos < _capacity - 1) {
             _buffer[_writePos++] = c;
             _buffer[_writePos] = '\0';
@@ -304,13 +278,6 @@ public:
         return 0;
     }
     size_t write(const uint8_t *buffer, size_t size) override {
-        uint32_t now = millis();
-        if (now - lastRedrawMs >= 80) {
-            animTick++;
-            drawFace(canvas, currentState, animTick);
-            canvas.pushSprite(0, 0);
-            lastRedrawMs = now;
-        }
         size_t space = (_writePos < _capacity - 1) ? (_capacity - 1 - _writePos) : 0;
         size_t toWrite = (size < space) ? size : space;
         if (toWrite > 0) {
@@ -392,7 +359,14 @@ public:
     String getRSSHeadlines(String url) {
         if (url.length() < 5) return "No news configured.";
         HTTPClient http;
-        http.begin(url);
+        WiFiClient client;
+        WiFiClientSecure secureClient;
+        if (url.startsWith("https://")) {
+            secureClient.setInsecure();
+            http.begin(secureClient, url);
+        } else {
+            http.begin(client, url);
+        }
         int httpCode = http.GET();
         String headlines = "";
         if (httpCode == HTTP_CODE_OK) {
@@ -496,6 +470,194 @@ private:
             Serial.printf("[AGENT] writeToStream error: %d\n", written);
         }
         return psStream.getWritePos();
+    }
+
+    String sendCustomPost(const String& url, Stream* payloadStream, size_t payloadLength, const String& contentType, const String& authHeader) {
+        bool isHttps = url.startsWith("https://");
+        if (!isHttps && !url.startsWith("http://")) {
+            return "Error: Custom POST only supports http:// or https://";
+        }
+        int hostStart = isHttps ? 8 : 7;
+        int hostEnd = url.indexOf('/', hostStart);
+        String host = (hostEnd == -1) ? url.substring(hostStart) : url.substring(hostStart, hostEnd);
+        String path = (hostEnd == -1) ? "/" : url.substring(hostEnd);
+
+        int port = isHttps ? 443 : 80;
+        int colonIdx = host.indexOf(':');
+        if (colonIdx != -1) {
+            port = host.substring(colonIdx + 1).toInt();
+            host = host.substring(0, colonIdx);
+        }
+
+        WiFiClient* clientPtr = nullptr;
+        WiFiClientSecure* secureClientPtr = nullptr;
+
+        if (isHttps) {
+            secureClientPtr = new WiFiClientSecure();
+            secureClientPtr->setInsecure();
+            clientPtr = secureClientPtr;
+        } else {
+            clientPtr = new WiFiClient();
+        }
+
+        clientPtr->setTimeout(30000);
+        clientPtr->setConnectionTimeout(10000);
+
+        Serial.printf("[CUSTOM_HTTP] Connecting to %s:%d...\n", host.c_str(), port);
+        if (!clientPtr->connect(host.c_str(), port)) {
+            delete clientPtr;
+            return "Error: Connection to proxy failed";
+        }
+
+        // Send all headers in a single print to avoid packet fragmentation
+        String req = "POST " + path + " HTTP/1.1\r\n" +
+                     "Host: " + host + "\r\n" +
+                     "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n";
+        if (authHeader.length() > 0) {
+            req += "Authorization: " + authHeader + "\r\n";
+        }
+        req += "Content-Type: " + contentType + "\r\n" +
+               "Content-Length: " + String(payloadLength) + "\r\n" +
+               "Connection: close\r\n\r\n";
+        
+        clientPtr->print(req);
+
+        Serial.printf("[CUSTOM_HTTP] Sending payload (%d bytes)...\n", payloadLength);
+        
+        // Use 256-byte chunks to fit easily in the TCP socket send buffer
+        uint8_t temp[256];
+        size_t remaining = payloadLength;
+        uint32_t lastPrintMs = millis();
+        uint32_t writeStartMs = millis();
+        
+        while (remaining > 0) {
+            // Check if server sent a response early
+            if (clientPtr->available() > 0) {
+                Serial.println("[CUSTOM_HTTP] Server sent early response, stopping write!");
+                break;
+            }
+
+            if (!clientPtr->connected()) {
+                if (clientPtr->available() > 0) {
+                    Serial.println("[CUSTOM_HTTP] Client disconnected but response is available!");
+                    break;
+                }
+                Serial.println("[CUSTOM_HTTP] Error: client disconnected during write!");
+                clientPtr->stop();
+                delete clientPtr;
+                return "Error: client disconnected during write";
+            }
+
+            size_t toRead = min(remaining, sizeof(temp));
+            size_t r = payloadStream->readBytes(temp, toRead);
+            if (r == 0) {
+                Serial.println("[CUSTOM_HTTP] Error: Stream ended prematurely!");
+                clientPtr->stop();
+                delete clientPtr;
+                return "Error: Payload stream ended prematurely";
+            }
+            
+            size_t written = 0;
+            while (written < r) {
+                if (clientPtr->available() > 0) {
+                    Serial.println("[CUSTOM_HTTP] Server sent early response during chunk write, stopping!");
+                    break;
+                }
+                if (!clientPtr->connected()) {
+                    if (clientPtr->available() > 0) {
+                        break;
+                    }
+                    Serial.println("[CUSTOM_HTTP] Error: client disconnected during write loop!");
+                    clientPtr->stop();
+                    delete clientPtr;
+                    return "Error: client disconnected during write loop";
+                }
+                int w = clientPtr->write(temp + written, r - written);
+                if (w < 0) {
+                    delay(50); // wait a short bit for any response packets
+                    if (clientPtr->available() > 0) {
+                        Serial.println("[CUSTOM_HTTP] client.write failed but response is available!");
+                        break;
+                    }
+                    Serial.printf("[CUSTOM_HTTP] Error: client.write returned %d (errno=%d)\n", w, errno);
+                    clientPtr->stop();
+                    delete clientPtr;
+                    return "Error: Write to socket failed";
+                }
+                if (w == 0) {
+                    // EAGAIN or full buffer. Wait a bit and retry.
+                    if (millis() - writeStartMs > 15000) { // 15 seconds timeout
+                        delay(50);
+                        if (clientPtr->available() > 0) {
+                            break;
+                        }
+                        Serial.printf("[CUSTOM_HTTP] Error: Write timeout! (errno=%d)\n", errno);
+                        clientPtr->stop();
+                        delete clientPtr;
+                        return "Error: Write to socket timeout";
+                    }
+                    delay(5);
+                    continue;
+                }
+                written += w;
+                writeStartMs = millis(); // Reset timeout since we successfully wrote some bytes
+            }
+            
+            if (clientPtr->available() > 0) {
+                break;
+            }
+            
+            remaining -= r;
+            if (millis() - lastPrintMs > 2000) {
+                lastPrintMs = millis();
+                Serial.printf("[CUSTOM_HTTP] Sent: %d%%\n", (int)(100 - (remaining * 100 / payloadLength)));
+            }
+        }
+        
+        Serial.println("[CUSTOM_HTTP] Payload sent. Reading response...");
+        
+        int statusCode = 0;
+        String line;
+        while (clientPtr->connected() || clientPtr->available()) {
+            line = clientPtr->readStringUntil('\n');
+            line.trim();
+            if (line.length() == 0) {
+                break;
+            }
+            if (line.startsWith("HTTP/1.1 ") || line.startsWith("HTTP/1.0 ")) {
+                statusCode = line.substring(9, 12).toInt();
+            }
+        }
+        
+        Serial.printf("[CUSTOM_HTTP] HTTP Status: %d\n", statusCode);
+        
+        String responseBody = "";
+        char readBuf[256];
+        while (clientPtr->connected() || clientPtr->available()) {
+            int avail = clientPtr->available();
+            if (avail > 0) {
+                int toRead = min(avail, (int)sizeof(readBuf) - 1);
+                int r = clientPtr->read((uint8_t*)readBuf, toRead);
+                if (r > 0) {
+                    readBuf[r] = '\0';
+                    responseBody += readBuf;
+                }
+                if (responseBody.length() > 65536) {
+                    break;
+                }
+            } else {
+                delay(5);
+            }
+        }
+        clientPtr->stop();
+        delete clientPtr;
+        
+        if (statusCode == 200) {
+            return responseBody;
+        } else {
+            Serial.printf("[CUSTOM_HTTP] Error body: %s\n", responseBody.c_str());
+            return "Error: HTTP " + String(statusCode) + " - " + responseBody;
+        }
     }
 
     String tryProvider(const String& audioPath, const String& prompt, const String& provider, const String& keys, const MelvinConfig& cfg) {
@@ -762,10 +924,35 @@ private:
                       totalLength, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
         String answer;
-        {
-            WiFiClient client;
-            client.setTimeout(30000);
-            client.setConnectionTimeout(30000);
+        String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + key;
+        if (cfg.api_proxy.length() > 0) {
+            url = cfg.api_proxy + "/gemini/v1beta/models/gemini-2.5-flash:generateContent?key=" + key;
+        }
+
+        if (cfg.api_proxy.length() > 0) {
+            GeminiStream gStream(file, jsonStart, jsonEnd);
+            String resp = sendCustomPost(url, &gStream, totalLength, "application/json", "");
+            file.close();
+            if (resp.startsWith("Error")) {
+                answer = resp;
+            } else {
+                JsonDocument res;
+                DeserializationError err = deserializeJson(res, resp);
+                if (err == DeserializationError::Ok) {
+                    if (res["candidates"] && res["candidates"][0] &&
+                        res["candidates"][0]["content"] &&
+                        res["candidates"][0]["content"]["parts"] &&
+                        res["candidates"][0]["content"]["parts"][0]) {
+                        answer = res["candidates"][0]["content"]["parts"][0]["text"].as<String>();
+                        Serial.printf("[AGENT] AI Answer: %s\n", answer.c_str());
+                    } else {
+                        answer = "Error API parsed response invalid";
+                    }
+                } else {
+                    answer = "Error API JSON parse failed";
+                }
+            }
+        } else {
             WiFiClientSecure secureClient;
             secureClient.setTimeout(30000);
             secureClient.setConnectionTimeout(30000);
@@ -773,24 +960,12 @@ private:
             http.setTimeout(30000); 
             http.setConnectTimeout(30000);
             
-            String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + key;
-            if (cfg.api_proxy.length() > 0) {
-                url = cfg.api_proxy + "/gemini/v1beta/models/gemini-2.5-flash:generateContent?key=" + key;
-                if (url.startsWith("https://")) {
-                    secureClient.setInsecure();
-                    http.begin(secureClient, url);
-                } else {
-                    http.begin(client, url);
-                }
-            } else {
-                secureClient.setInsecure();
-                http.begin(secureClient, url);
-            }
+            secureClient.setInsecure();
+            http.begin(secureClient, url);
             http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
             http.addHeader("Content-Type", "application/json");
             
             GeminiStream gStream(file, jsonStart, jsonEnd);
-            
             int code = http.sendRequest("POST", &gStream, totalLength);
             file.close();
             
@@ -835,8 +1010,8 @@ private:
                 answer = "Error API " + String(code);
             }
             http.end();
-        } // WiFiClientSecure + HTTPClient fully destroyed here
-        delay(150); // Give lwIP stack time to fully close the SSL socket
+            delay(150); // Give lwIP stack time to fully close the SSL socket
+        }
         return answer;
     }
 
@@ -848,10 +1023,38 @@ private:
 
         // Use a scoped block so WiFiClient destructor runs before next request
         String result;
-        {
-            WiFiClient client;
-            client.setTimeout(30000);
-            client.setConnectionTimeout(30000);
+        String url = "https://api.groq.com/openai/v1/audio/transcriptions";
+        if (cfg.api_proxy.length() > 0) {
+            url = cfg.api_proxy + "/groq/openai/v1/audio/transcriptions";
+        }
+
+        String boundary = "----MelvinBoundary123456789";
+        String contentType = "multipart/form-data; boundary=" + boundary;
+        String header = "--" + boundary + "\r\n" +
+                        "Content-Disposition: form-data; name=\"model\"\r\n\r\n" +
+                        "whisper-large-v3-turbo\r\n" +
+                        "--" + boundary + "\r\n" +
+                        "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n" +
+                        "Content-Type: audio/wav\r\n\r\n";
+        String footer = "\r\n--" + boundary + "--\r\n";
+        size_t totalLength = header.length() + fileSize + footer.length();
+        MultipartStream mpStream(file, header, footer);
+
+        if (cfg.api_proxy.length() > 0) {
+            String resp = sendCustomPost(url, &mpStream, totalLength, contentType, "Bearer " + key);
+            file.close();
+            if (resp.startsWith("Error")) {
+                result = resp;
+            } else {
+                JsonDocument doc;
+                DeserializationError err = deserializeJson(doc, resp);
+                if (err == DeserializationError::Ok) {
+                    result = doc["text"].as<String>();
+                } else {
+                    result = "Error: Groq JSON parse failed";
+                }
+            }
+        } else {
             WiFiClientSecure secureClient;
             secureClient.setTimeout(30000);
             secureClient.setConnectionTimeout(30000);
@@ -859,36 +1062,12 @@ private:
             http.setTimeout(30000);
             http.setConnectTimeout(30000);
             
-            String url = "https://api.groq.com/openai/v1/audio/transcriptions";
-            if (cfg.api_proxy.length() > 0) {
-                url = cfg.api_proxy + "/groq/openai/v1/audio/transcriptions";
-                if (url.startsWith("https://")) {
-                    secureClient.setInsecure();
-                    http.begin(secureClient, url);
-                } else {
-                    http.begin(client, url);
-                }
-            } else {
-                secureClient.setInsecure();
-                http.begin(secureClient, url);
-            }
+            secureClient.setInsecure();
+            http.begin(secureClient, url);
             http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
             http.addHeader("Authorization", "Bearer " + key);
+            http.addHeader("Content-Type", contentType);
 
-            String boundary = "----MelvinBoundary123456789";
-            http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-
-            String header = "--" + boundary + "\r\n" +
-                            "Content-Disposition: form-data; name=\"model\"\r\n\r\n" +
-                            "whisper-large-v3-turbo\r\n" +
-                            "--" + boundary + "\r\n" +
-                            "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n" +
-                            "Content-Type: audio/wav\r\n\r\n";
-            String footer = "\r\n--" + boundary + "--\r\n";
-
-            size_t totalLength = header.length() + fileSize + footer.length();
-
-            MultipartStream mpStream(file, header, footer);
             int code = http.sendRequest("POST", &mpStream, totalLength);
             file.close();
 
@@ -903,8 +1082,8 @@ private:
                 http.end();
                 result = "Error: Groq STT failed (" + String(code) + "): " + err;
             }
-        } // WiFiClientSecure + HTTPClient fully destroyed here
-        delay(150); // Give lwIP stack time to fully close the SSL socket
+            delay(150); // Give lwIP stack time to fully close the SSL socket
+        }
         return result;
     }
 
@@ -915,10 +1094,38 @@ private:
         size_t fileSize = file.size();
 
         String result;
-        {
-            WiFiClient client;
-            client.setTimeout(30000);
-            client.setConnectionTimeout(30000);
+        String url = "https://openrouter.ai/api/v1/audio/transcriptions";
+        if (cfg.api_proxy.length() > 0) {
+            url = cfg.api_proxy + "/openrouter/api/v1/audio/transcriptions";
+        }
+
+        String boundary = "----MelvinBoundary7731";
+        String contentType = "multipart/form-data; boundary=" + boundary;
+        String header = "--" + boundary + "\r\n" +
+                        "Content-Disposition: form-data; name=\"model\"\r\n\r\n" +
+                        "openai/whisper-1\r\n" +
+                        "--" + boundary + "\r\n" +
+                        "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n" +
+                        "Content-Type: audio/wav\r\n\r\n";
+        String footer = "\r\n--" + boundary + "--\r\n";
+        size_t totalLength = header.length() + fileSize + footer.length();
+        MultipartStream mpStream(file, header, footer);
+
+        if (cfg.api_proxy.length() > 0) {
+            String resp = sendCustomPost(url, &mpStream, totalLength, contentType, "Bearer " + key);
+            file.close();
+            if (resp.startsWith("Error")) {
+                result = resp;
+            } else {
+                JsonDocument doc;
+                DeserializationError err = deserializeJson(doc, resp);
+                if (err == DeserializationError::Ok) {
+                    result = doc["text"].as<String>();
+                } else {
+                    result = "Error: OpenRouter JSON parse failed";
+                }
+            }
+        } else {
             WiFiClientSecure secureClient;
             secureClient.setTimeout(30000);
             secureClient.setConnectionTimeout(30000);
@@ -926,36 +1133,12 @@ private:
             http.setTimeout(30000);
             http.setConnectTimeout(30000);
             
-            String url = "https://openrouter.ai/api/v1/audio/transcriptions";
-            if (cfg.api_proxy.length() > 0) {
-                url = cfg.api_proxy + "/openrouter/api/v1/audio/transcriptions";
-                if (url.startsWith("https://")) {
-                    secureClient.setInsecure();
-                    http.begin(secureClient, url);
-                } else {
-                    http.begin(client, url);
-                }
-            } else {
-                secureClient.setInsecure();
-                http.begin(secureClient, url);
-            }
+            secureClient.setInsecure();
+            http.begin(secureClient, url);
             http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
             http.addHeader("Authorization", "Bearer " + key);
+            http.addHeader("Content-Type", contentType);
 
-            String boundary = "----MelvinBoundary7731";
-            http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-
-            String header = "--" + boundary + "\r\n" +
-                            "Content-Disposition: form-data; name=\"model\"\r\n\r\n" +
-                            "openai/whisper-1\r\n" +
-                            "--" + boundary + "\r\n" +
-                            "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n" +
-                            "Content-Type: audio/wav\r\n\r\n";
-            String footer = "\r\n--" + boundary + "--\r\n";
-
-            size_t totalLength = header.length() + fileSize + footer.length();
-
-            MultipartStream mpStream(file, header, footer);
             int code = http.sendRequest("POST", &mpStream, totalLength);
             file.close();
 
@@ -987,8 +1170,8 @@ private:
                 result = "Error: OpenRouter STT failed (" + String(code) + "): " + err;
             }
             http.end();
-        } // WiFiClientSecure + HTTPClient fully destroyed here
-        delay(150); // Give lwIP stack time to fully close the SSL socket
+            delay(150); // Give lwIP stack time to fully close the SSL socket
+        }
         return result;
     }
 

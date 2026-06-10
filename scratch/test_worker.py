@@ -5,7 +5,7 @@ import sys
 import os
 
 def test_proxy():
-    proxy_url = "https://throbbing-snowflake-5897.hollabaughcahoon.workers.dev/groq/openai/v1/chat/completions"
+    proxy_url = "http://throbbing-snowflake-5897.hollabaughcahoon.workers.dev/groq/openai/v1/chat/completions"
     api_key = os.environ.get("GROQ_API_KEY", "YOUR_GROQ_API_KEY")
     headers = {
         "Content-Type": "application/json",
