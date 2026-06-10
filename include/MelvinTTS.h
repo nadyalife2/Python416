@@ -14,6 +14,8 @@
 #include <esp_random.h>
 
 extern bool playWavFromSD(const char* path);
+extern bool playMp3FromSD(const char* path);
+#define BOOT_BTN_PIN 0
 
 // Forward declarations for display redrawing during network transfer
 extern uint32_t lastRedrawMs;
@@ -27,23 +29,77 @@ public:
 
     void speak(String text, const MelvinConfig& cfg) {
         if (text.length() == 0) return;
-        
-        Serial.printf("[TTS] Synthesizing with %s...\n", cfg.tts_provider.c_str());
-        
-        if (cfg.tts_provider == "google") {
-            synthesizeGoogle(text, cfg);
-        } else if (cfg.tts_provider == "yandex") {
-            synthesizeYandex(text, cfg);
-        } else if (cfg.tts_provider == "openai") {
-            synthesizeOpenAI(text, cfg);
-        } else if (cfg.tts_provider == "elevenlabs") {
-            synthesizeElevenLabs(text, cfg);
-        } else if (cfg.tts_provider == "none") {
-            Serial.println("[TTS] Provider is none, playing random phrase from SD.");
-            speakRandomPhrase();
-        } else {
-            Serial.printf("[TTS] Provider '%s' not fully implemented, playing placeholder.\n", cfg.tts_provider.c_str());
-            speakRandomPhrase();
+
+        // Clean text - replace markdown asterisks/formatting which sounds weird
+        text.replace("*", "");
+        text.replace("`", "");
+
+        // Split text into sentences using punctuation (. ! ? ; \n)
+        std::vector<String> sentences;
+        int start = 0;
+        int len = text.length();
+        for (int i = 0; i < len; i++) {
+            char c = text[i];
+            if (c == '.' || c == '!' || c == '?' || c == ';' || c == '\n') {
+                String s = text.substring(start, i + 1);
+                s.trim();
+                if (s.length() > 0) {
+                    sentences.push_back(s);
+                }
+                start = i + 1;
+            }
+        }
+        if (start < len) {
+            String s = text.substring(start);
+            s.trim();
+            if (s.length() > 0) {
+                sentences.push_back(s);
+            }
+        }
+
+        if (sentences.empty()) {
+            sentences.push_back(text);
+        }
+
+        Serial.printf("[TTS] Split response into %d sentences for streaming.\n", sentences.size());
+
+        for (size_t idx = 0; idx < sentences.size(); idx++) {
+            // Check button before synthesis of each sentence
+            if (digitalRead(BOOT_BTN_PIN) == LOW) {
+                Serial.println("[TTS] Synthesis loop aborted by button press!");
+                break;
+            }
+
+            String sentence = sentences[idx];
+            Serial.printf("[TTS] Synthesizing sentence %d/%d: \"%s\"\n", idx + 1, sentences.size(), sentence.c_str());
+
+            bool playResult = false;
+            if (cfg.tts_provider == "google") {
+                playResult = synthesizeGoogle(sentence, cfg);
+            } else if (cfg.tts_provider == "google_free") {
+                playResult = synthesizeGoogleFree(sentence, cfg);
+            } else if (cfg.tts_provider == "yandex") {
+                playResult = synthesizeYandex(sentence, cfg);
+            } else if (cfg.tts_provider == "openai") {
+                playResult = synthesizeOpenAI(sentence, cfg);
+            } else if (cfg.tts_provider == "elevenlabs") {
+                playResult = synthesizeElevenLabs(sentence, cfg);
+            } else if (cfg.tts_provider == "none") {
+                Serial.println("[TTS] Provider is none, playing random phrase.");
+                speakRandomPhrase();
+                playResult = true;
+                break;
+            } else {
+                Serial.printf("[TTS] Provider '%s' not implemented, playing random phrase.\n", cfg.tts_provider.c_str());
+                speakRandomPhrase();
+                playResult = true;
+                break;
+            }
+
+            if (!playResult) {
+                Serial.println("[TTS] Sentence playback failed or aborted by button. Breaking loop.");
+                break;
+            }
         }
     }
 
@@ -174,6 +230,13 @@ private:
                 file.close();
                 return false;
             }
+            if (digitalRead(BOOT_BTN_PIN) == LOW) {
+                Serial.println("[TTS] Base64 decode aborted by button press!");
+                free(decodeBuf);
+                file.close();
+                return false;
+            }
+
             if (stream.available()) {
                 char c = stream.read();
                 startMs = millis(); // Reset timeout on data
@@ -235,13 +298,13 @@ private:
         return totalDecoded > 0;
     }
 
-    void synthesizeElevenLabs(String text, const MelvinConfig& cfg) {
+    bool synthesizeElevenLabs(String text, const MelvinConfig& cfg) {
         if (cfg.tts_key.length() < 10) {
             Serial.println("[TTS] No ElevenLabs API Key. Speech synthesis skipped.");
-            return;
+            return false;
         }
 
-        const size_t maxTtsChars = 200;
+        const size_t maxTtsChars = 500;
         if (text.length() > maxTtsChars) {
             text = text.substring(0, maxTtsChars);
         }
@@ -286,12 +349,13 @@ private:
         int code = http.POST(body);
         Serial.printf("[TTS][ElevenLabs] HTTP %d\n", code);
 
+        bool playResult = false;
         if (code == 200) {
             WiFiClient& stream = http.getStream();
             bool success = writeLpcmToWav(stream, "/resp.wav", 16000);
             if (success) {
                 Serial.println("[TTS][ElevenLabs] Saved, playing...");
-                playWavFromSD("/resp.wav");
+                playResult = playWavFromSD("/resp.wav");
             } else {
                 Serial.println("[TTS][ElevenLabs] Stream write failed!");
                 if (SD_MMC.exists("/error.wav")) {
@@ -305,18 +369,17 @@ private:
             }
         }
         http.end();
+        return playResult;
     }
 
-    void synthesizeGoogle(String text, const MelvinConfig& cfg) {
+    bool synthesizeGoogle(String text, const MelvinConfig& cfg) {
         if (cfg.tts_key.length() < 10) {
             Serial.println("[TTS] No Google API Key. Speech synthesis skipped.");
-            return;
+            return false;
         }
 
-        // Limit length to 200 characters to prevent OOM
-        const size_t maxTtsChars = 200;
+        const size_t maxTtsChars = 500;
         if (text.length() > maxTtsChars) {
-            Serial.printf("[TTS] Text too long (%d chars), truncating to %d\n", text.length(), maxTtsChars);
             text = text.substring(0, maxTtsChars);
         }
         Serial.printf("[TTS] Synthesizing %d chars...\n", text.length());
@@ -349,7 +412,6 @@ private:
 
         JsonDocument doc;
         doc["input"]["text"] = text;
-        // Динамически извлекаем languageCode из имени голоса (e.g. "ru-RU-Wavenet-B" → "ru-RU")
         String langCode = "ru-RU"; // fallback
         if (cfg.tts_voice.length() >= 5) {
             langCode = cfg.tts_voice.substring(0, 5);
@@ -357,29 +419,30 @@ private:
         doc["voice"]["languageCode"] = langCode;
         doc["voice"]["name"] = cfg.tts_voice;
         doc["audioConfig"]["audioEncoding"] = "LINEAR16";
-        doc["audioConfig"]["sampleRateHertz"] = 16000; // Force 16kHz format
+        doc["audioConfig"]["sampleRateHertz"] = 16000; 
 
         String body;
         serializeJson(doc, body);
 
         int code = http.POST(body);
+        bool playResult = false;
         if (code == 200) {
             WiFiClient& stream = http.getStream();
             bool success = decodeTtsStreamToWav(stream, "/resp.wav");
             if (success) {
                 Serial.println("[TTS] Response saved, playing...");
-                playWavFromSD("/resp.wav");
+                playResult = playWavFromSD("/resp.wav");
             } else {
                 Serial.println("[TTS] Stream decoding failed!");
             }
         } else {
             Serial.printf("[TTS] Google Error %d: %s\n", code, http.getString().c_str());
-            // Проигрываем ошибку, но не hello.wav, чтобы не вызывать зацикливание VAD
             if (SD_MMC.exists("/error.wav")) {
                 playWavFromSD("/error.wav");
             }
         }
         http.end();
+        return playResult;
     }
 
     // ============================================================
@@ -391,13 +454,13 @@ private:
     // Free tier: 1 000 000 characters/month
     // Works from Russia: YES
     // ============================================================
-    void synthesizeYandex(String text, const MelvinConfig& cfg) {
+    bool synthesizeYandex(String text, const MelvinConfig& cfg) {
         if (cfg.tts_key.length() < 10) {
             Serial.println("[TTS] No Yandex API Key. Speech synthesis skipped.");
-            return;
+            return false;
         }
 
-        const size_t maxTtsChars = 200;
+        const size_t maxTtsChars = 500;
         if (text.length() > maxTtsChars) {
             text = text.substring(0, maxTtsChars);
         }
@@ -430,12 +493,9 @@ private:
         http.addHeader("Authorization", "Api-Key " + cfg.tts_key);
         http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
-        // Voice options for Russian: filipp, alena, jane, omazh, zahar, ermil
-        // Default voice from cfg.tts_voice, fallback to "filipp"
         String voice = (cfg.tts_voice.length() > 0) ? cfg.tts_voice : "filipp";
         uint32_t sampleRate = 16000;
 
-        // URL-encode the text (basic encoding: spaces → +, Cyrillic stays UTF-8)
         String encodedText = "";
         for (size_t i = 0; i < text.length(); i++) {
             char c = text[i];
@@ -444,7 +504,6 @@ private:
                      (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
                 encodedText += c;
             } else {
-                // Percent-encode byte
                 char hex[4];
                 snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c);
                 encodedText += hex;
@@ -461,13 +520,13 @@ private:
         int code = http.POST(body);
         Serial.printf("[TTS][Yandex] HTTP %d\n", code);
 
+        bool playResult = false;
         if (code == 200) {
-            // Yandex returns raw LPCM — write WAV header + PCM data to SD
             WiFiClient& stream = http.getStream();
             bool success = writeLpcmToWav(stream, "/resp.wav", sampleRate);
             if (success) {
                 Serial.println("[TTS][Yandex] Saved, playing...");
-                playWavFromSD("/resp.wav");
+                playResult = playWavFromSD("/resp.wav");
             } else {
                 Serial.println("[TTS][Yandex] Stream write failed!");
             }
@@ -476,6 +535,7 @@ private:
             if (SD_MMC.exists("/error.wav")) playWavFromSD("/error.wav");
         }
         http.end();
+        return playResult;
     }
 
     // Write raw LPCM stream from Yandex to SD as valid WAV file
@@ -529,6 +589,13 @@ private:
         uint32_t totalPcm = 0;
         uint32_t startMs = millis();
         while (millis() - startMs < 20000) {
+            if (digitalRead(BOOT_BTN_PIN) == LOW) {
+                Serial.println("[TTS][Yandex] LPCM write aborted by button press!");
+                free(buf);
+                file.close();
+                return false;
+            }
+
             // Animate face during download
             uint32_t now = millis();
             if (now - lastRedrawMs >= 80) {
@@ -579,13 +646,13 @@ private:
     // Free tier: $5 credit on new accounts (~500k chars)
     // Works from Russia: UNCERTAIN (may be geoblocked)
     // ============================================================
-    void synthesizeOpenAI(String text, const MelvinConfig& cfg) {
+    bool synthesizeOpenAI(String text, const MelvinConfig& cfg) {
         if (cfg.tts_key.length() < 10) {
             Serial.println("[TTS] No OpenAI API Key. Speech synthesis skipped.");
-            return;
+            return false;
         }
 
-        const size_t maxTtsChars = 200;
+        const size_t maxTtsChars = 500;
         if (text.length() > maxTtsChars) {
             text = text.substring(0, maxTtsChars);
         }
@@ -618,8 +685,6 @@ private:
         http.addHeader("Authorization", "Bearer " + cfg.tts_key);
         http.addHeader("Content-Type", "application/json");
 
-        // Voice options: alloy, ash, ballad, coral, echo, fable, nova, onyx, sage, shimmer
-        // For Russian: alloy or nova recommended
         String voice = (cfg.tts_voice.length() > 0) ? cfg.tts_voice : "alloy";
 
         JsonDocument doc;
@@ -634,13 +699,13 @@ private:
         int code = http.POST(body);
         Serial.printf("[TTS][OpenAI] HTTP %d\n", code);
 
+        bool playResult = false;
         if (code == 200) {
-            // OpenAI returns raw WAV — write directly to SD
             WiFiClient& stream = http.getStream();
             bool success = writeStreamToFile(stream, "/resp.wav");
             if (success) {
                 Serial.println("[TTS][OpenAI] Saved, playing...");
-                playWavFromSD("/resp.wav");
+                playResult = playWavFromSD("/resp.wav");
             } else {
                 Serial.println("[TTS][OpenAI] Stream write failed!");
             }
@@ -649,6 +714,72 @@ private:
             if (SD_MMC.exists("/error.wav")) playWavFromSD("/error.wav");
         }
         http.end();
+        return playResult;
+    }
+
+    // Free Google Translate TTS (Path 3) returning MP3
+    bool synthesizeGoogleFree(String text, const MelvinConfig& cfg) {
+        Serial.printf("[TTS][GoogleFree] Synthesizing %d chars...\n", text.length());
+
+        WiFiClient client;
+        client.setTimeout(30000);
+        client.setConnectionTimeout(30000);
+        WiFiClientSecure secureClient;
+        secureClient.setTimeout(30000);
+        secureClient.setConnectionTimeout(30000);
+        HTTPClient http;
+        http.setTimeout(30000);
+        http.setConnectTimeout(30000);
+
+        String encodedText = "";
+        for (size_t i = 0; i < text.length(); i++) {
+            char c = text[i];
+            if (c == ' ') encodedText += '+';
+            else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                     (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+                 encodedText += c;
+            } else {
+                 char hex[4];
+                 snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c);
+                 encodedText += hex;
+            }
+        }
+
+        String url = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ru&q=" + encodedText;
+        if (cfg.api_proxy.length() > 0) {
+            url = cfg.api_proxy + "/google-free-tts/translate_tts?ie=UTF-8&client=tw-ob&tl=ru&q=" + encodedText;
+        }
+
+        if (url.startsWith("https://")) {
+            secureClient.setInsecure();
+            http.begin(secureClient, url);
+        } else {
+            http.begin(client, url);
+        }
+
+        http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+
+        int code = http.GET();
+        Serial.printf("[TTS][GoogleFree] HTTP %d\n", code);
+
+        bool playSuccess = false;
+        if (code == 200) {
+            WiFiClient& stream = http.getStream();
+            bool success = writeStreamToFile(stream, "/resp.mp3");
+            if (success) {
+                Serial.println("[TTS][GoogleFree] Saved MP3, playing...");
+                playSuccess = playMp3FromSD("/resp.mp3");
+            } else {
+                Serial.println("[TTS][GoogleFree] MP3 stream write failed!");
+            }
+        } else {
+            Serial.printf("[TTS][GoogleFree] Error %d: %s\n", code, http.getString().c_str());
+            if (SD_MMC.exists("/error.wav")) {
+                playWavFromSD("/error.wav");
+            }
+        }
+        http.end();
+        return playSuccess;
     }
 
     // Write raw stream (e.g. WAV) directly from network to SD file
@@ -669,6 +800,13 @@ private:
         uint32_t totalBytes = 0;
         uint32_t startMs = millis();
         while (millis() - startMs < 20000) {
+            if (digitalRead(BOOT_BTN_PIN) == LOW) {
+                Serial.println("[TTS] Stream write aborted by button press!");
+                free(buf);
+                file.close();
+                return false;
+            }
+
             uint32_t now = millis();
             if (now - lastRedrawMs >= 80) {
                 animTick++;

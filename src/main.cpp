@@ -8,6 +8,8 @@
 #include <driver/gpio.h>
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
+#include "MP3DecoderHelix.h"
+
 
 #include "Display.h"
 #include "RabbitFace.h"
@@ -384,7 +386,14 @@ bool playWavFromSD(const char* path) {
         }
     }
 
+    bool aborted = false;
     while (file.available()) {
+        if (digitalRead(BOOT_BTN_PIN) == LOW) {
+            Serial.println("[WAV] Playback aborted by button press!");
+            aborted = true;
+            break;
+        }
+
         size_t read = file.read(rawBuf, bufSize);
         if (read == 0) break;
 
@@ -450,7 +459,139 @@ bool playWavFromSD(const char* path) {
     if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
         switchToRX(); // Restore listening mode
     }
-    return true;
+    return !aborted;
+}
+
+// ============================================================
+// MP3 Playback using Helix decoder
+// ============================================================
+using namespace libhelix;
+
+static i2s_chan_handle_t mp3_tx_handle = NULL;
+static bool mp3_abort = false;
+static uint32_t lastMp3Rate = 0;
+
+void helixCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void* ref) {
+    if (mp3_abort) return;
+    if (digitalRead(BOOT_BTN_PIN) == LOW) {
+        Serial.println("[MP3] Playback aborted by button press inside decoder callback!");
+        mp3_abort = true;
+        return;
+    }
+
+    // Dynamically adjust I2S sample rate if it changes
+    if (info.samprate != lastMp3Rate) {
+        Serial.printf("[MP3] Config I2S clock to %d Hz, %d channels\n", info.samprate, info.nChans);
+        i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(info.samprate);
+        clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+        esp_err_t err = i2s_channel_reconfig_std_clock(mp3_tx_handle, &clk_cfg);
+        if (err == ESP_OK) {
+            lastMp3Rate = info.samprate;
+        } else {
+            Serial.printf("[MP3] Failed to reconfig I2S clock: %d\n", err);
+        }
+    }
+
+    size_t written = 0;
+    if (info.nChans == 1) {
+        // Expand Mono to Stereo
+        int16_t stereoBuf[1152 * 2];
+        for (size_t i = 0; i < len; i++) {
+            stereoBuf[i*2]     = pcm_buffer[i];
+            stereoBuf[i*2 + 1] = pcm_buffer[i];
+        }
+        i2s_channel_write(mp3_tx_handle, stereoBuf, len * 4, &written, portMAX_DELAY);
+    } else {
+        // Stereo PCM
+        i2s_channel_write(mp3_tx_handle, pcm_buffer, len * 2, &written, portMAX_DELAY);
+    }
+
+    // Keep face animate ticking
+    uint32_t now = millis();
+    if (now - lastRedrawMs >= REDRAW_MS) {
+        animTick++;
+        drawFace(canvas, currentState, animTick);
+        canvas.pushSprite(0, 0);
+        lastRedrawMs = now;
+    }
+}
+
+bool playMp3FromSD(const char* path) {
+    switchToTX();
+    if (!sdReady) return false;
+    File file = SD_MMC.open(path, FILE_READ);
+    if (!file) {
+        Serial.printf("[MP3] File not found: %s\n", path);
+        if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
+            switchToRX();
+        }
+        return false;
+    }
+
+    mp3_tx_handle = tx_handle;
+    mp3_abort = false;
+    lastMp3Rate = SAMPLE_RATE; // reset
+
+    MP3DecoderHelix mp3(helixCallback);
+    mp3.begin();
+
+    // Turn ON amplifier
+    digitalWrite(PA_CTRL_PIN, HIGH);
+    delay(10);
+
+    const size_t chunk_size = 1024;
+    uint8_t* file_buf = (uint8_t*)heap_caps_malloc(chunk_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!file_buf) {
+        file_buf = (uint8_t*)malloc(chunk_size);
+    }
+    if (!file_buf) {
+        file.close();
+        digitalWrite(PA_CTRL_PIN, LOW);
+        if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
+            switchToRX();
+        }
+        return false;
+    }
+
+    Serial.printf("[MP3] Starting playback of %s...\n", path);
+
+    while (file.available() && !mp3_abort) {
+        if (digitalRead(BOOT_BTN_PIN) == LOW) {
+            Serial.println("[MP3] Playback aborted by button press!");
+            mp3_abort = true;
+            break;
+        }
+
+        size_t bytesRead = file.read(file_buf, chunk_size);
+        if (bytesRead == 0) break;
+
+        mp3.write(file_buf, bytesRead);
+    }
+
+    free(file_buf);
+    file.close();
+
+    // DMA Drain Flush: Push enough silence
+    static const int16_t silenceBuf[512] = {0};
+    size_t _silWritten = 0;
+    for (int i = 0; i < 24; i++) {
+        i2s_channel_write(tx_handle, silenceBuf, sizeof(silenceBuf), &_silWritten, portMAX_DELAY);
+    }
+
+    digitalWrite(PA_CTRL_PIN, LOW); // Mute amplifier
+    delay(150);
+
+    // Restore standard I2S clock
+    Serial.printf("[MP3] Restoring I2S clock to %u Hz\n", SAMPLE_RATE);
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE);
+    clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
+
+    if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
+        switchToRX();
+    }
+
+    return !mp3_abort;
 }
 
 // ============================================================
