@@ -294,6 +294,37 @@ public:
     size_t getWritePos() const { return _writePos; }
 };
 
+// ============================================================
+// Fast read-only stream backed by a PSRAM buffer
+// Used to send pre-loaded audio payloads at full speed
+// ============================================================
+class PSRAMReadStream : public Stream {
+private:
+    const uint8_t* _buf;
+    size_t _len;
+    size_t _pos = 0;
+public:
+    PSRAMReadStream(const uint8_t* buf, size_t len) : _buf(buf), _len(len) {}
+    int available() override { return (int)(_len - _pos); }
+    int read() override {
+        if (_pos < _len) return _buf[_pos++];
+        return -1;
+    }
+    size_t readBytes(uint8_t* out, size_t sz) override {
+        size_t toRead = min(sz, _len - _pos);
+        if (toRead > 0) {
+            memcpy(out, _buf + _pos, toRead);
+            _pos += toRead;
+        }
+        return toRead;
+    }
+    size_t readBytes(char* out, size_t sz) override {
+        return readBytes((uint8_t*)out, sz);
+    }
+    int peek() override { return (_pos < _len) ? _buf[_pos] : -1; }
+    size_t write(uint8_t) override { return 0; }
+};
+
 class MelvinAgent {
 public:
     // --- Infinite Memory (SD-Backed JSONL Format) ---
@@ -417,49 +448,128 @@ public:
         return headlines;
     }
 
-    // --- Resilient LLM Cascade (Gemini -> Groq -> OpenRouter) ---
+    // --- Direct N8N Webhook POST ---
     String askAI(const String& audioPath, const MelvinConfig& cfg) {
-        String news = getRSSHeadlines(cfg.rss_url);
-        String historyContext = getRecentHistory();
-        String prompt = cfg.getEffectivePrompt() + "\n\nNEWS:\n" + news + "\n\nRECENT CONTEXT:\n" + historyContext;
+        if (cfg.api_proxy.length() < 10) return "Error: webhook URL not configured.";
+        String url = cfg.api_proxy;
+        
+        File file = SD_MMC.open(audioPath, FILE_READ);
+        if (!file) return "Error: Open audio failed";
+        size_t fileSize = file.size();
 
-        String primaryProvider = cfg.llm_provider;
-        String primaryKeys = (primaryProvider == "gemini") ? cfg.gemini_keys : 
-                             (primaryProvider == "groq") ? cfg.groq_keys : 
-                             (primaryProvider == "yandex") ? cfg.yandex_keys : cfg.openrouter_keys;
+        // Build multipart envelope
+        String boundary = "----MelvinBoundary123456789";
+        String headerPart = "--" + boundary + "\r\n"
+                            "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
+                            "Content-Type: audio/wav\r\n\r\n";
+        String footerPart = "\r\n--" + boundary + "--\r\n";
+        size_t totalPayloadSize = headerPart.length() + fileSize + footerPart.length();
 
-        String answer = tryProvider(audioPath, prompt, primaryProvider, primaryKeys, cfg);
-        if (!answer.startsWith("Error")) {
+        // Allocate PSRAM buffer for the entire payload
+        uint8_t* psramBuf = (uint8_t*)heap_caps_malloc(totalPayloadSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!psramBuf) {
+            file.close();
+            return "Error: PSRAM alloc failed for payload";
+        }
+
+        // Copy header
+        size_t offset = 0;
+        memcpy(psramBuf + offset, headerPart.c_str(), headerPart.length());
+        offset += headerPart.length();
+
+        // Copy WAV from SD into PSRAM (direct read, no stack buffer)
+        size_t bytesRead = 0;
+        while (bytesRead < fileSize) {
+            size_t toRead = min((size_t)4096, fileSize - bytesRead);
+            size_t r = file.read(psramBuf + offset, toRead);
+            if (r == 0) break;
+            offset += r;
+            bytesRead += r;
+        }
+        file.close();
+
+        // Copy footer
+        memcpy(psramBuf + offset, footerPart.c_str(), footerPart.length());
+        offset += footerPart.length();
+        totalPayloadSize = offset; // actual size after read
+
+        Serial.printf("[AGENT] POSTing %d bytes (PSRAM buffered) to %s\n", totalPayloadSize, url.c_str());
+
+        // Send using PSRAMReadStream — data flows from RAM at full speed, no SD latency
+        PSRAMReadStream psStream(psramBuf, totalPayloadSize);
+
+        WiFiClient client;
+        client.setTimeout(60000);
+        WiFiClientSecure secureClient;
+        secureClient.setTimeout(60000);
+        secureClient.setInsecure();
+        
+        HTTPClient http;
+        http.setTimeout(60000);
+        http.setConnectTimeout(30000);
+        
+        if (url.startsWith("https://")) {
+            http.begin(secureClient, url);
+        } else {
+            http.begin(client, url);
+        }
+        
+        http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+        http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+        
+        int httpCode = http.sendRequest("POST", &psStream, totalPayloadSize);
+        free(psramBuf);
+        
+        String result;
+        if (httpCode > 0) {
+            if (httpCode == 200 || httpCode == 201) {
+                // n8n returns an MP3 file, so we must stream it directly to SD card
+                File outMp3 = SD_MMC.open("/response.mp3", FILE_WRITE);
+                if (outMp3) {
+                    int bytesWritten = http.writeToStream(&outMp3);
+                    outMp3.close();
+                    Serial.printf("[AGENT] Received MP3 payload: %d bytes saved to /response.mp3\n", bytesWritten);
+                    result = "[PLAY_MP3]";
+                } else {
+                    result = "Error: Failed to open /response.mp3 for writing";
+                }
+            } else {
+                String response = http.getString();
+                result = "Error: Server returned " + String(httpCode) + " " + response;
+            }
+        } else {
+            String err = http.errorToString(httpCode);
+            Serial.printf("[AGENT] HTTPClient POST failed: %s\n", err.c_str());
+            result = "Error: POST failed - " + err;
+        }
+        
+        http.end();
+        
+        if (result.startsWith("Error")) {
+            // After a failed TLS upload, ESP32 socket table may be corrupted (errno 9).
+            // Force WiFi reconnect to flush all stale sockets before next request.
+            Serial.println("[AGENT] POST failed — forcing WiFi reconnect to recover sockets...");
+            WiFi.disconnect();
+            delay(500);
+            WiFi.reconnect();
+            uint32_t t = millis();
+            while (WiFi.status() != WL_CONNECTED && millis() - t < 8000) {
+                delay(200);
+            }
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.println("[AGENT] WiFi reconnected OK.");
+            } else {
+                Serial.println("[AGENT] WiFi reconnect timeout!");
+            }
+        } else {
+            delay(150);
+        }
+        
+        if (!result.startsWith("Error")) {
             appendToHistory("user", "[Voice Input]");
-            appendToHistory("model", answer);
-            return answer;
+            appendToHistory("model", result);
         }
-
-        Serial.printf("[AGENT] Primary provider %s failed. Trying fallbacks...\n", primaryProvider.c_str());
-
-        String fallbackProviders[] = { "gemini", "groq", "openrouter", "yandex" };
-        for (const String& provider : fallbackProviders) {
-            if (provider == primaryProvider) continue;
-
-            String keys = (provider == "gemini") ? cfg.gemini_keys : 
-                          (provider == "groq") ? cfg.groq_keys : 
-                          (provider == "yandex") ? cfg.yandex_keys : cfg.openrouter_keys;
-
-            if (keys.length() < 5) {
-                Serial.printf("[AGENT] Fallback provider %s has no keys configured. Skipping.\n", provider.c_str());
-                continue;
-            }
-
-            Serial.printf("[AGENT] Attempting fallback provider: %s\n", provider.c_str());
-            answer = tryProvider(audioPath, prompt, provider, keys, cfg);
-            if (!answer.startsWith("Error")) {
-                appendToHistory("user", "[Voice Input]");
-                appendToHistory("model", answer);
-                return answer;
-            }
-        }
-
-        return "Error: All keys and fallback providers failed.";
+        return result;
     }
 
 private:

@@ -166,11 +166,8 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 <label>Провайдер TTS</label>
 <select id="tts_provider">
 <option value="none">Без TTS (выкл.)</option>
-<option value="yandex">Yandex SpeechKit (WAV)</option>
-<option value="google_free">Google Translate (Бесплатно, MP3)</option>
-<option value="google">Google Cloud TTS (Paid, WAV)</option>
-<option value="elevenlabs">ElevenLabs</option>
-<option value="openai">OpenAI TTS</option>
+<option value="yandex">Yandex SpeechKit (Поток LPCM)</option>
+<option value="google_free">Google Translate (Поток MP3)</option>
 </select>
 <label>TTS API ключ</label>
 <div class="inp-wrap">

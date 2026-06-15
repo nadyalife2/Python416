@@ -20,12 +20,20 @@
 #include "Agent.h"
 #include "Recorder.h"
 #include "esp_vad.h"
+#include "esp_netif.h"
+#include "esp_netif_net_stack.h"
+#include "lwip/netif.h"
 
 // ============================================================
 // I2S handles
 // ============================================================
 i2s_chan_handle_t tx_handle = NULL;
 i2s_chan_handle_t rx_handle = NULL;
+
+// Global Helix variables
+bool mp3_abort = false;
+i2s_chan_handle_t mp3_tx_handle = NULL;
+uint32_t lastMp3Rate = 16000;
 
 // ============================================================
 // Глобальные объекты
@@ -67,9 +75,8 @@ int               vad_processed_frames = 0; // VAD frame index tracker
 #define REDRAW_MS       80   
 
 // ============================================================
-// Прототипы
-// ============================================================
 bool playWavFromSD(const char* path);
+bool playMp3FromSD(const char* path);
 void setState(RobotState s);
 void startWebServer();
 void startAPMode();
@@ -283,9 +290,7 @@ bool playWavFromSD(const char* path) {
     if (!wavParseHeader(file, channels, sampleRate, bitsPerSample, dataSize, dataOffset)) {
         Serial.println("[WAV] Failed to parse WAV header!");
         file.close();
-        if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
-            switchToRX();
-        }
+        switchToRX();
         return false;
     }
 
@@ -293,9 +298,7 @@ bool playWavFromSD(const char* path) {
     if (bitsPerSample != 16) {
         Serial.printf("[WAV] Unsupported bit depth: %u-bit (only 16-bit is supported)\n", bitsPerSample);
         file.close();
-        if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
-            switchToRX();
-        }
+        switchToRX();
         return false;
     }
 
@@ -331,9 +334,7 @@ bool playWavFromSD(const char* path) {
             clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
             i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
         }
-        if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
-            switchToRX();
-        }
+        switchToRX();
         return false;
     }
 
@@ -350,9 +351,7 @@ bool playWavFromSD(const char* path) {
             clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
             i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
         }
-        if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
-            switchToRX();
-        }
+        switchToRX();
         return false;
     }
 
@@ -420,15 +419,6 @@ bool playWavFromSD(const char* path) {
         if (err != ESP_OK) {
             Serial.printf("[WAV] i2s_channel_write error: %d\n", err);
         }
-
-        // --- Keep Rabbit Face Redraw Ticking ---
-        uint32_t now = millis();
-        if (now - lastRedrawMs >= REDRAW_MS) {
-            animTick++;
-            drawFace(canvas, currentState, animTick);
-            canvas.pushSprite(0, 0);
-            lastRedrawMs = now;
-        }
     }
 
     free(rawBuf);
@@ -452,13 +442,12 @@ bool playWavFromSD(const char* path) {
         Serial.printf("[WAV] Restoring I2S clock to %u Hz\n", SAMPLE_RATE);
         i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE);
         clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+        i2s_channel_disable(tx_handle);
         i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
+        i2s_channel_enable(tx_handle);
     }
 
-    // Switch back to RX if FSM is in listening state (IDLE or RECORDING)
-    if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
-        switchToRX(); // Restore listening mode
-    }
+    switchToRX();
     return !aborted;
 }
 
@@ -467,9 +456,7 @@ bool playWavFromSD(const char* path) {
 // ============================================================
 using namespace libhelix;
 
-static i2s_chan_handle_t mp3_tx_handle = NULL;
-static bool mp3_abort = false;
-static uint32_t lastMp3Rate = 0;
+
 
 void helixCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void* ref) {
     if (mp3_abort) return;
@@ -484,7 +471,9 @@ void helixCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void* re
         Serial.printf("[MP3] Config I2S clock to %d Hz, %d channels\n", info.samprate, info.nChans);
         i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(info.samprate);
         clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+        i2s_channel_disable(mp3_tx_handle);
         esp_err_t err = i2s_channel_reconfig_std_clock(mp3_tx_handle, &clk_cfg);
+        i2s_channel_enable(mp3_tx_handle);
         if (err == ESP_OK) {
             lastMp3Rate = info.samprate;
         } else {
@@ -495,7 +484,7 @@ void helixCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void* re
     size_t written = 0;
     if (info.nChans == 1) {
         // Expand Mono to Stereo
-        int16_t stereoBuf[1152 * 2];
+        static int16_t stereoBuf[1152 * 2];
         for (size_t i = 0; i < len; i++) {
             stereoBuf[i*2]     = pcm_buffer[i];
             stereoBuf[i*2 + 1] = pcm_buffer[i];
@@ -505,15 +494,6 @@ void helixCallback(MP3FrameInfo &info, int16_t *pcm_buffer, size_t len, void* re
         // Stereo PCM
         i2s_channel_write(mp3_tx_handle, pcm_buffer, len * 2, &written, portMAX_DELAY);
     }
-
-    // Keep face animate ticking
-    uint32_t now = millis();
-    if (now - lastRedrawMs >= REDRAW_MS) {
-        animTick++;
-        drawFace(canvas, currentState, animTick);
-        canvas.pushSprite(0, 0);
-        lastRedrawMs = now;
-    }
 }
 
 bool playMp3FromSD(const char* path) {
@@ -522,9 +502,7 @@ bool playMp3FromSD(const char* path) {
     File file = SD_MMC.open(path, FILE_READ);
     if (!file) {
         Serial.printf("[MP3] File not found: %s\n", path);
-        if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
-            switchToRX();
-        }
+        switchToRX();
         return false;
     }
 
@@ -547,9 +525,7 @@ bool playMp3FromSD(const char* path) {
     if (!file_buf) {
         file.close();
         digitalWrite(PA_CTRL_PIN, LOW);
-        if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
-            switchToRX();
-        }
+        switchToRX();
         return false;
     }
 
@@ -585,14 +561,18 @@ bool playMp3FromSD(const char* path) {
     Serial.printf("[MP3] Restoring I2S clock to %u Hz\n", SAMPLE_RATE);
     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE);
     clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    i2s_channel_disable(tx_handle);
     i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
+    i2s_channel_enable(tx_handle);
 
-    if (currentState == STATE_IDLE || currentState == STATE_RECORDING) {
-        switchToRX();
-    }
+    switchToRX();
 
     return !mp3_abort;
 }
+
+// ============================================================
+// PCM Stream Playback
+
 
 // ============================================================
 // Robot States & UI
@@ -621,9 +601,7 @@ void setState(RobotState s) {
     }
 
     currentState = s;
-    drawFace(canvas, currentState, animTick);
-    canvas.pushSprite(0, 0);
-    lastRedrawMs = millis();
+    // DisplayTask handles drawing asynchronously
 }
 
 // ============================================================
@@ -692,7 +670,19 @@ void startWebServer() {
                     configMgr.config.rss_url          = doc["rss_url"]          | configMgr.config.rss_url;
                     configMgr.config.system_prompt    = doc["system_prompt"]    | configMgr.config.system_prompt;
                     configMgr.config.api_proxy        = doc["api_proxy"]        | configMgr.config.api_proxy;
-                    configMgr.save();
+                    
+                    Serial.println("=== SAVING NEW CONFIG ===");
+                    Serial.printf("LLM Provider: %s\n", configMgr.config.llm_provider.c_str());
+                    Serial.printf("Gemini Key length: %d\n", configMgr.config.gemini_keys.length());
+                    Serial.printf("Groq Key length: %d\n", configMgr.config.groq_keys.length());
+                    Serial.printf("TTS Provider: %s\n", configMgr.config.tts_provider.c_str());
+                    
+                    bool success = configMgr.save();
+                    if (!success) {
+                        Serial.println("[ERROR] Failed to write config.json to SD card!");
+                    } else {
+                        Serial.println("[CONFIG] Saved to SD card successfully!");
+                    }
                     
                     Serial.println("[CONFIG] Saved successfully!");
                     AsyncWebServerResponse* res = req->beginResponse(200, "text/plain", "OK");
@@ -883,6 +873,7 @@ void connectWifi() {
     setState(STATE_CONNECTING);
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false); // CRITICAL: Disable Wi-Fi sleep to prevent TCP connection drops during slow Base64 streaming uploads!
     WiFi.begin(configMgr.config.wifi_ssid.c_str(), configMgr.config.wifi_pass.c_str());
     
     uint32_t t = millis();
@@ -900,6 +891,15 @@ void connectWifi() {
         IPAddress ip = WiFi.localIP();
         Serial.print("[WiFi] Connected successfully! IP: ");
         Serial.println(ip);
+        
+        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (netif != NULL) {
+            struct netif *lwip_netif = (struct netif *)esp_netif_get_netif_impl(netif);
+            if (lwip_netif != NULL) {
+                lwip_netif->mtu = 1300;
+                Serial.println("[WiFi] lwIP netif MTU set to 1300");
+            }
+        }
         
         if (MDNS.begin("melvin")) {
             MDNS.addService("http", "tcp", 80);
@@ -954,11 +954,28 @@ void setup() {
     pinMode(PA_CTRL_PIN,  OUTPUT);
     digitalWrite(PA_CTRL_PIN, LOW); // Mute at start
 
-    // 1. Display
+    // 1. Display Init (Sequentially in setup to avoid race conditions on startup)
     lcd.init();
     canvas.createSprite(240, 240);
     drawFace(canvas, STATE_BOOT, 0);
     canvas.pushSprite(0, 0);
+
+    // Create DisplayTask for async redrawing only
+    xTaskCreatePinnedToCore(
+        [](void* arg) {
+            while (true) {
+                uint32_t now = millis();
+                if (now - lastRedrawMs >= REDRAW_MS) {
+                    animTick++;
+                    drawFace(canvas, currentState, animTick);
+                    canvas.pushSprite(0, 0);
+                    lastRedrawMs = now;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+        },
+        "DisplayTask", 4096, NULL, 1, NULL, 0
+    );
 
     // 2. SD Card
     SD_MMC.setPins(17, 18, 21);
@@ -1023,7 +1040,9 @@ void setup() {
     
     // Background auto-reconnection setup
     WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false); // CRITICAL: Disable Wi-Fi sleep to prevent TCP connection drops during slow Base64 streaming uploads!
     connectWifi();
+
 }
 
 // VAD buffer shared between loop() and setState() for idle-reset
@@ -1054,12 +1073,7 @@ void loop() {
         ESP.restart();
     }
 
-    if (now - lastRedrawMs >= REDRAW_MS) {
-        animTick++;
-        drawFace(canvas, currentState, animTick);
-        canvas.pushSprite(0, 0);
-        lastRedrawMs = now;
-    }
+
 
     // --- Heap low-memory warning ---
     static uint32_t lastHeapWarnMs = 0;
@@ -1081,6 +1095,14 @@ void loop() {
             WiFi.reconnect(); // Явный реконнект — setAutoReconnect может не сработать после долгого разрыва
         } else if (!wifiConnected) {
             wifiConnected = true;
+            WiFi.setSleep(false); // CRITICAL: Keep Wi-Fi sleep disabled on reconnection!
+            esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            if (netif != NULL) {
+                struct netif *lwip_netif = (struct netif *)esp_netif_get_netif_impl(netif);
+                if (lwip_netif != NULL) {
+                    lwip_netif->mtu = 1300;
+                }
+            }
             Serial.println("[WiFi] Reconnected successfully!");
         }
     }
@@ -1136,7 +1158,11 @@ void loop() {
                         setState(STATE_THINKING);
                         String answer = agent.askAI(path, configMgr.config);
                         setState(STATE_SPEAKING);
-                        tts.speak(answer, configMgr.config);
+                        if (answer == "[PLAY_MP3]") {
+                            playMp3FromSD("/response.mp3");
+                        } else {
+                            tts.speak(answer, configMgr.config);
+                        }
                     }
                     setState(STATE_IDLE);
                     return;
@@ -1158,7 +1184,11 @@ void loop() {
                 setState(STATE_THINKING);
                 String answer = agent.askAI(path, configMgr.config);
                 setState(STATE_SPEAKING);
-                tts.speak(answer, configMgr.config);
+                if (answer == "[PLAY_MP3]") {
+                    playMp3FromSD("/response.mp3");
+                } else {
+                    tts.speak(answer, configMgr.config);
+                }
             }
             setState(STATE_IDLE);
         }

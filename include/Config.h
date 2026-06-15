@@ -81,15 +81,12 @@ public:
         if (proxy.endsWith("/")) {
             proxy = proxy.substring(0, proxy.length() - 1);
         }
+        // Remove auto-migration to http:// since Cloudflare Workers enforce HTTPS.
+        // We fixed the lwIP MTU to 1300, which resolves the HTTPS packet drop issue.
         config.api_proxy = proxy;
         Serial.printf("[CONFIG] Loaded api_proxy from SD: '%s'\n", config.api_proxy.c_str());
 
-        // Auto-migrate: Gemini is geoblocked in Russia, Google TTS requires OAuth not API key
-        if (config.llm_provider == "gemini") {
-            Serial.println("[CONFIG] Auto-migrating llm_provider: gemini -> groq (geoblocked)");
-            config.llm_provider = (config.groq_keys.length() > 5) ? "groq" :
-                                  (config.openrouter_keys.length() > 5) ? "openrouter" : "groq";
-        }
+        // (Removed auto-migration for gemini since we use a proxy now)
 
         return true;
     }
