@@ -25,6 +25,24 @@
 #include "lwip/netif.h"
 
 // ============================================================
+// Russian & ASCII UTF-8 Lowercase Helper (Russian characters support)
+// ============================================================
+String toLowerRu(String s) {
+    for (int i = 0; i < (int)s.length() - 1; i++) {
+        uint8_t b0 = s[i], b1 = s[i+1];
+        if (b0 == 0xD0 && b1 >= 0x90 && b1 <= 0x9F) { s[i+1] = b1 + 0x20; i++; }
+        else if (b0 == 0xD0 && b1 >= 0xA0 && b1 <= 0xAF) { s[i] = 0xD1; s[i+1] = b1 - 0x20; i++; }
+        else if (b0 == 0xD0 && b1 == 0x81) { s[i] = 0xD1; s[i+1] = 0x91; i++; }
+    }
+    for (int i = 0; i < (int)s.length(); i++) {
+        if (s[i] >= 'A' && s[i] <= 'Z') {
+            s[i] = s[i] + 32;
+        }
+    }
+    return s;
+}
+
+// ============================================================
 // I2S handles
 // ============================================================
 i2s_chan_handle_t tx_handle = NULL;
@@ -601,6 +619,7 @@ void setState(RobotState s) {
     }
     if (s == STATE_IDLE) {
         s_vad_buf_idx = 0; // Flush stale VAD window on re-entry to IDLE
+        s_pre_buf_idx = 0;
     }
 
     currentState = s;
@@ -1281,10 +1300,8 @@ void loop() {
             text.trim();
             Serial.printf("[WAKE] Transcribed text: '%s'\n", text.c_str());
             
-            String cleanText = text;
-            cleanText.toLowerCase();
-            String cleanWakeWord = configMgr.config.wake_word;
-            cleanWakeWord.toLowerCase();
+            String cleanText = toLowerRu(text);
+            String cleanWakeWord = toLowerRu(configMgr.config.wake_word);
             
             if (cleanText.length() > 0 && cleanText.indexOf(cleanWakeWord) != -1) {
                 Serial.println("[WAKE] Wake word detected!");
@@ -1294,7 +1311,7 @@ void loop() {
                 recorder.startRecording();
                 recorder.prependBuffer(s_pre_buf, 24000);
                 recStartMs = millis();
-                silenceStartMs = millis();
+                silenceStartMs = millis() + configMgr.config.vad_silence_ms;
                 setState(STATE_RECORDING);
                 vad_processed_frames = recorder.getFrameCount();
             } else {

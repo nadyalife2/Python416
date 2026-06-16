@@ -64,15 +64,15 @@ public:
     };
 
     void speakAsync(const String& text, const MelvinConfig& cfg) {
-        static TtsTask params;
-        params = {this, text, cfg};
+        TtsTask* params = new TtsTask{this, text, cfg};
         xTaskCreate([](void* arg) {
             auto* p = (TtsTask*)arg;
             p->tts->tts_playing = true;
             p->tts->speak(p->text, p->cfg);
             p->tts->tts_playing = false;
+            delete p;
             vTaskDelete(NULL);
-        }, "tts", 8192, &params, 5, nullptr);
+        }, "tts", 8192, params, 5, nullptr);
     }
 
     bool begin() { return true; }

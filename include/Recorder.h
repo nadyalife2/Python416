@@ -56,10 +56,16 @@ public:
     }
 
     void prependBuffer(const int16_t* preroll, size_t samples) {
-        if (samples > 0 && phrase_buf && (phrase_frames + samples) < REC_PHRASE_MAX) {
-            memmove(phrase_buf + samples, phrase_buf, phrase_frames * sizeof(int16_t));
-            memcpy(phrase_buf, preroll, samples * sizeof(int16_t));
-            phrase_frames += samples;
+        if (samples > 0 && phrase_buf) {
+            size_t safe_samples = samples;
+            if (phrase_frames + safe_samples > REC_PHRASE_MAX) {
+                safe_samples = REC_PHRASE_MAX - phrase_frames;
+            }
+            if (safe_samples > 0) {
+                memmove(phrase_buf + safe_samples, phrase_buf, phrase_frames * sizeof(int16_t));
+                memcpy(phrase_buf, preroll, safe_samples * sizeof(int16_t));
+                phrase_frames += safe_samples;
+            }
         }
     }
 
