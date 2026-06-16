@@ -102,6 +102,8 @@ public:
         if (!b64Buf) b64Buf = (char*)malloc(1028);
     }
 
+    bool isValid() const { return rawBuf != nullptr && b64Buf != nullptr; }
+
     ~GeminiStream() override {
         if (rawBuf) free(rawBuf);
         if (b64Buf) free(b64Buf);
@@ -327,6 +329,7 @@ public:
 
 class MelvinAgent {
 public:
+    String lastTranscription;
     // --- Infinite Memory (SD-Backed JSONL Format) ---
     void appendToHistory(String role, String text) {
         File file = SD_MMC.open("/history.jsonl", FILE_APPEND);
@@ -341,6 +344,31 @@ public:
             file.println();
             file.close();
         }
+    }
+
+    void trimHistoryIfNeeded(size_t maxBytes = 32 * 1024) {
+        if (!SD_MMC.exists("/history.jsonl")) return;
+        File f = SD_MMC.open("/history.jsonl", FILE_READ);
+        if (!f || f.size() < maxBytes) { if(f) f.close(); return; }
+        
+        size_t keepFrom = f.size() - (maxBytes / 2);
+        f.seek(keepFrom);
+        String tail = f.readString();
+        f.close();
+        
+        // Выровнять по границе строки JSONL
+        int nl = tail.indexOf('\n');
+        if (nl > 0) tail = tail.substring(nl + 1);
+        
+        File out = SD_MMC.open("/history.jsonl", FILE_WRITE);
+        if (out) { out.print(tail); out.close(); }
+        Serial.printf("[AGENT] History trimmed to ~%d bytes\n", tail.length());
+    }
+
+    void recordExchange(const String& userText, const String& botAnswer) {
+        if (userText.length() > 0) appendToHistory("user", userText);
+        if (botAnswer.length() > 0) appendToHistory("model", botAnswer);
+        trimHistoryIfNeeded(); // обрезать если > 32KB
     }
 
     String getRecentHistory(size_t maxBytes = 2048) {
@@ -431,16 +459,27 @@ public:
                 free(buf);
 
                 int count = 0, pos = 0;
+                bool skipFirst = true; // первый <title> = название канала, всегда пропускаем
+
                 while ((pos = payload.indexOf("<title>", pos)) != -1 && count < 5) {
                     int end = payload.indexOf("</title>", pos);
-                    if (end != -1) {
-                        String title = payload.substring(pos + 7, end);
-                        if (title.indexOf("Lenta") == -1) {
-                            headlines += "- " + title + "\n";
-                            count++;
-                        }
+                    if (end == -1) break;
+                    
+                    if (skipFirst) {
+                        skipFirst = false; // пропустить заголовок канала
                         pos = end;
-                    } else break;
+                        continue;
+                    }
+                    
+                    String title = payload.substring(pos + 7, end);
+                    title.replace("<![CDATA[", "");
+                    title.replace("]]>", "");
+                    title.trim();
+                    if (title.length() > 5) {
+                        headlines += "- " + title + "\n";
+                        count++;
+                    }
+                    pos = end;
                 }
             }
         }
@@ -565,11 +604,27 @@ public:
             delay(150);
         }
         
-        if (!result.startsWith("Error")) {
-            appendToHistory("user", "[Voice Input]");
-            appendToHistory("model", result);
-        }
         return result;
+    }
+
+    String tryProvider(const String& audioPath, const String& prompt, const String& provider, const String& keys, const MelvinConfig& cfg) {
+        int start = 0;
+        int end = keys.indexOf(',');
+        while (true) {
+            String currentKey = (end == -1) ? keys.substring(start) : keys.substring(start, end);
+            currentKey.trim();
+
+            String result = callSingleAPI(audioPath, prompt, provider, currentKey, cfg);
+            if (!result.startsWith("Error")) {
+                return result;
+            }
+
+            if (end == -1) break;
+            start = end + 1;
+            end = keys.indexOf(',', start);
+            Serial.println("[AGENT] Key failed, trying next key in cascade...");
+        }
+        return "Error: All keys failed for " + provider;
     }
 
 private:
@@ -770,41 +825,27 @@ private:
         }
     }
 
-    String tryProvider(const String& audioPath, const String& prompt, const String& provider, const String& keys, const MelvinConfig& cfg) {
-        int start = 0;
-        int end = keys.indexOf(',');
-        while (true) {
-            String currentKey = (end == -1) ? keys.substring(start) : keys.substring(start, end);
-            currentKey.trim();
 
-            String result = callSingleAPI(audioPath, prompt, provider, currentKey, cfg);
-            if (!result.startsWith("Error")) {
-                return result;
-            }
-
-            if (end == -1) break;
-            start = end + 1;
-            end = keys.indexOf(',', start);
-            Serial.println("[AGENT] Key failed, trying next key in cascade...");
-        }
-        return "Error: All keys failed for " + provider;
-    }
 
     String callSingleAPI(const String& audioPath, const String& prompt, const String& provider, const String& key, const MelvinConfig& cfg) {
+        String history = getRecentHistory(2048);
+        String contextPrompt = prompt;
+        if (history.length() > 10) {
+            contextPrompt += "\n\nПоследние реплики диалога:\n" + history;
+        }
+
         if (provider == "gemini") {
-            return callGemini(audioPath, prompt, key, cfg);
+            return callGemini(audioPath, contextPrompt, key, cfg);
         } else if (provider == "yandex") {
             String text = transcribeYandexSTT(audioPath, key, cfg);
             if (text.startsWith("Error")) return text;
             Serial.printf("[AGENT] Transcribed text (Yandex): %s\n", text.c_str());
-            String fullPrompt = prompt + "\n\nUser said: " + text;
-            return callYandexGPT(fullPrompt, key, cfg);
+            return callYandexGPT(contextPrompt, text, key, cfg);
         } else if (provider == "groq") {
             String text = transcribeGroqWhisper(audioPath, key, cfg);
             if (text.startsWith("Error")) return text;
             Serial.printf("[AGENT] Transcribed text: %s\n", text.c_str());
-            String fullPrompt = prompt + "\n\nUser said: " + text;
-            return callGroqChat(fullPrompt, key, cfg);
+            return callGroqChat(contextPrompt, text, key, cfg);
         } else if (provider == "openrouter") {
             Serial.println("[AGENT] Trying OpenRouter STT transcription...");
             String text = transcribeOpenRouter(audioPath, key, cfg);
@@ -825,8 +866,7 @@ private:
             }
             if (text.startsWith("Error")) return text;
             Serial.printf("[AGENT] Transcribed text for OpenRouter: %s\n", text.c_str());
-            String fullPrompt = prompt + "\n\nUser said: " + text;
-            return callOpenRouterChat(fullPrompt, key, cfg);
+            return callOpenRouterChat(contextPrompt, text, key, cfg);
         }
         return "Error: Unsupported provider: " + provider;
     }
@@ -894,6 +934,7 @@ private:
                 deserializeJson(doc, resp);
                 http.end();
                 result = doc["result"].as<String>();
+                lastTranscription = result;
             } else {
                 String err = http.getString();
                 http.end();
@@ -905,7 +946,7 @@ private:
     }
 
     // --- YANDEX GPT LLM CLIENT ---
-    String callYandexGPT(const String& prompt, const String& key, const MelvinConfig& cfg) {
+    String callYandexGPT(const String& systemPrompt, const String& userText, const String& key, const MelvinConfig& cfg) {
         int colonIdx = key.indexOf(':');
         if (colonIdx == -1) {
             return "Error: Yandex key format must be FolderID:ApiKey";
@@ -953,9 +994,13 @@ private:
             compOpts["maxTokens"] = 1000;
 
             JsonArray messages = doc["messages"].to<JsonArray>();
-            JsonObject msg = messages.add<JsonObject>();
-            msg["role"] = "user";
-            msg["text"] = prompt;
+            JsonObject sysMsg = messages.add<JsonObject>();
+            sysMsg["role"] = "system";
+            sysMsg["text"] = systemPrompt;
+
+            JsonObject userMsg = messages.add<JsonObject>();
+            userMsg["role"] = "user";
+            userMsg["text"] = userText;
 
             String body;
             serializeJson(doc, body);
@@ -1041,6 +1086,10 @@ private:
 
         if (cfg.api_proxy.length() > 0) {
             GeminiStream gStream(file, jsonStart, jsonEnd);
+            if (!gStream.isValid()) {
+                file.close();
+                return "Error: GeminiStream memory allocation failed";
+            }
             String resp = sendCustomPost(url, &gStream, totalLength, "application/json", "");
             file.close();
             if (resp.startsWith("Error")) {
@@ -1076,6 +1125,10 @@ private:
             http.addHeader("Content-Type", "application/json");
             
             GeminiStream gStream(file, jsonStart, jsonEnd);
+            if (!gStream.isValid()) {
+                file.close();
+                return "Error: GeminiStream memory allocation failed";
+            }
             int code = http.sendRequest("POST", &gStream, totalLength);
             file.close();
             
@@ -1160,6 +1213,7 @@ private:
                 DeserializationError err = deserializeJson(doc, resp);
                 if (err == DeserializationError::Ok) {
                     result = doc["text"].as<String>();
+                    lastTranscription = result;
                 } else {
                     result = "Error: Groq JSON parse failed";
                 }
@@ -1187,6 +1241,7 @@ private:
                 deserializeJson(doc, resp);
                 http.end();
                 result = doc["text"].as<String>();
+                lastTranscription = result;
             } else {
                 String err = http.getString();
                 http.end();
@@ -1231,6 +1286,7 @@ private:
                 DeserializationError err = deserializeJson(doc, resp);
                 if (err == DeserializationError::Ok) {
                     result = doc["text"].as<String>();
+                    lastTranscription = result;
                 } else {
                     result = "Error: OpenRouter JSON parse failed";
                 }
@@ -1270,6 +1326,7 @@ private:
                     JsonDocument doc;
                     deserializeJson(doc, respBuf, got);
                     result = doc["text"].as<String>();
+                    lastTranscription = result;
                     heap_caps_free(respBuf);
                 } else {
                     result = "Error: Out of memory for OpenRouter STT response";
@@ -1286,7 +1343,7 @@ private:
     }
 
     // --- GROQ CHAT CLIENT ---
-    String callGroqChat(const String& prompt, const String& key, const MelvinConfig& cfg) {
+    String callGroqChat(const String& systemPrompt, const String& userText, const String& key, const MelvinConfig& cfg) {
         // Use scoped block for clean SSL socket lifecycle
         String result;
         {
@@ -1320,9 +1377,13 @@ private:
             JsonDocument doc;
             // Try llama-3.3-70b-versatile first (best quality on Groq)
             doc["model"] = "llama-3.3-70b-versatile";
-            JsonObject msg = doc["messages"].add<JsonObject>();
-            msg["role"] = "user";
-            msg["content"] = prompt;
+            JsonObject sysMsg = doc["messages"].add<JsonObject>();
+            sysMsg["role"] = "system";
+            sysMsg["content"] = systemPrompt;
+
+            JsonObject userMsg = doc["messages"].add<JsonObject>();
+            userMsg["role"] = "user";
+            userMsg["content"] = userText;
 
             String body;
             serializeJson(doc, body);
@@ -1369,7 +1430,7 @@ private:
     }
 
     // --- OPENROUTER CHAT CLIENT (с каскадом моделей) ---
-    String callOpenRouterChat(const String& prompt, const String& key, const MelvinConfig& cfg) {
+    String callOpenRouterChat(const String& systemPrompt, const String& userText, const String& key, const MelvinConfig& cfg) {
         // Каскад моделей: сначала мощная, потом авто-auto если не доступна
         const char* models[] = {
             "meta-llama/llama-3.3-70b-instruct:free",   // 1. Лучшая бесплатная Llama 3.3 70B
@@ -1415,9 +1476,13 @@ private:
 
                 JsonDocument doc;
                 doc["model"] = models[mi];
-                JsonObject msg = doc["messages"].add<JsonObject>();
-                msg["role"] = "user";
-                msg["content"] = prompt;
+                JsonObject sysMsg = doc["messages"].add<JsonObject>();
+                sysMsg["role"] = "system";
+                sysMsg["content"] = systemPrompt;
+
+                JsonObject userMsg = doc["messages"].add<JsonObject>();
+                userMsg["role"] = "user";
+                userMsg["content"] = userText;
 
                 String body;
                 serializeJson(doc, body);

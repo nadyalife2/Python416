@@ -634,6 +634,7 @@ void startWebServer() {
         doc["rss_url"]          = configMgr.config.rss_url;
         doc["system_prompt"]    = configMgr.config.system_prompt;
         doc["api_proxy"]        = configMgr.config.api_proxy;
+        doc["tts_language"]     = configMgr.config.tts_language;
         String body;
         serializeJson(doc, body);
         AsyncWebServerResponse* res = req->beginResponse(200, "application/json", body);
@@ -654,7 +655,7 @@ void startWebServer() {
                 if (err == DeserializationError::Ok) {
                     configMgr.config.wifi_ssid        = doc["wifi_ssid"]        | configMgr.config.wifi_ssid;
                     String new_wifi_pass = doc["wifi_pass"] | "";
-                    if (new_wifi_pass.length() > 0) {
+                    if (new_wifi_pass != "__KEEP__" && new_wifi_pass.length() > 0) {
                         configMgr.config.wifi_pass = new_wifi_pass;
                     }
                     configMgr.config.gemini_keys      = doc["gemini_keys"]      | configMgr.config.gemini_keys;
@@ -670,6 +671,7 @@ void startWebServer() {
                     configMgr.config.rss_url          = doc["rss_url"]          | configMgr.config.rss_url;
                     configMgr.config.system_prompt    = doc["system_prompt"]    | configMgr.config.system_prompt;
                     configMgr.config.api_proxy        = doc["api_proxy"]        | configMgr.config.api_proxy;
+                    configMgr.config.tts_language     = doc["tts_language"]     | configMgr.config.tts_language;
                     
                     Serial.println("=== SAVING NEW CONFIG ===");
                     Serial.printf("LLM Provider: %s\n", configMgr.config.llm_provider.c_str());
@@ -741,6 +743,11 @@ void startWebServer() {
         doc["state"]          = stateName(currentState);
         doc["rssi"]           = WiFi.RSSI();
         doc["ip"]             = WiFi.localIP().toString();
+        doc["sd_ok"]          = sdReady;
+        doc["sd_total_kb"]    = sdReady ? (uint32_t)(SD_MMC.totalBytes() / 1024) : 0;
+        doc["sd_used_kb"]     = sdReady ? (uint32_t)(SD_MMC.usedBytes() / 1024) : 0;
+        doc["history_kb"]     = (sdReady && SD_MMC.exists("/history.jsonl"))
+                                 ? (uint32_t)(SD_MMC.open("/history.jsonl").size() / 1024) : 0;
         String body;
         serializeJson(doc, body);
         AsyncWebServerResponse* res = req->beginResponse(200, "application/json", body);
@@ -908,14 +915,13 @@ void connectWifi() {
         
         startWebServer();
         setState(STATE_SPEAKING);
-        if (SD_MMC.exists("/ready.wav")) {
-            playWavFromSD("/ready.wav");
-        } else {
-            delay(100); // Короткая пауза
-        }
+        if (sdReady && SD_MMC.exists("/ready.wav")) playWavFromSD("/ready.wav");
+        else if (sdReady && SD_MMC.exists("/hello.wav")) playWavFromSD("/hello.wav");
         setState(STATE_IDLE);
     } else {
         Serial.println("[WiFi] Connection timeout. Switching to AP mode...");
+        if (sdReady && SD_MMC.exists("/ap_mode.wav")) playWavFromSD("/ap_mode.wav");
+        else if (sdReady && SD_MMC.exists("/hello.wav")) playWavFromSD("/hello.wav");
         startAPMode();
     }
 }
@@ -1017,10 +1023,7 @@ void setup() {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     initES8311();
 
-    // 5. Play startup greeting now that I2S and Codec are fully ready
-    if (sdReady && SD_MMC.exists("/hello.wav")) {
-        playWavFromSD("/hello.wav");
-    }
+    // Codec initialized
 
     // 5. VAD Init
     vad_inst = vad_create(VAD_MODE_2);
@@ -1047,6 +1050,41 @@ void setup() {
 
 // VAD buffer shared between loop() and setState() for idle-reset
 // (VAD buffers declared above setState(), before loop())
+
+void handleRecordingDone() {
+    String path = recorder.stopAndSave();
+    if (path.length() == 0 || !wifiConnected) {
+        setState(STATE_IDLE);
+        return;
+    }
+    setState(STATE_THINKING);
+    
+    String answer;
+    String transcribed = agent.lastTranscription;
+    
+    if (configMgr.config.api_proxy.length() > 9) {
+        answer = agent.askAI(path, configMgr.config);
+    } else {
+        answer = agent.tryProvider(path, configMgr.config.getEffectivePrompt(),
+                                   configMgr.config.llm_provider,
+                                   configMgr.config.getActiveKeys(),
+                                   configMgr.config);
+    }
+    
+    setState(STATE_SPEAKING);
+    
+    if (answer.length() == 0 || answer.startsWith("Error")) {
+        if (sdReady && SD_MMC.exists("/error.wav")) playWavFromSD("/error.wav");
+        else tts.speakAsync("Не удалось получить ответ", configMgr.config);
+    } else if (answer == "[PLAY_MP3]") {
+        playMp3FromSD("/response.mp3");
+    } else {
+        tts.speakAsync(answer, configMgr.config);
+        agent.recordExchange(transcribed, answer);
+    }
+    
+    setState(STATE_IDLE);
+}
 
 // ============================================================
 // LOOP - With VAD and Auto-Interaction
@@ -1108,7 +1146,7 @@ void loop() {
     }
 
     // --- Interaction Logic ---
-    if (currentState == STATE_IDLE) {
+    if (currentState == STATE_IDLE && !tts.tts_playing) {
         // Manual button trigger to start recording
         if (btnClicked) {
             Serial.println("[BUTTON] Manual recording triggered!");
@@ -1131,8 +1169,9 @@ void loop() {
                     if (vad_process(vad_inst, s_vad_buf, SAMPLE_RATE, 30) == VAD_SPEECH) {
                         Serial.println("[VAD] Speech detected!");
                         recorder.startRecording();
+                        recorder.prependBuffer(s_vad_buf, 480);
                         recStartMs = now;
-                        silenceStartMs = now + 1000;
+                        silenceStartMs = now + 1500;
                         setState(STATE_RECORDING);
                     }
                     s_vad_buf_idx = 0;
@@ -1152,19 +1191,7 @@ void loop() {
             if (vad_process(vad_inst, frame_ptr, SAMPLE_RATE, 30) == VAD_SILENCE) {
                 if (now > silenceStartMs && now - silenceStartMs > 1500) { // 1.5 seconds of silence
                     Serial.println("[VAD] Silence detected → stop");
-                    String path = recorder.stopAndSave();
-                    
-                    if (path.length() > 0 && wifiConnected) {
-                        setState(STATE_THINKING);
-                        String answer = agent.askAI(path, configMgr.config);
-                        setState(STATE_SPEAKING);
-                        if (answer == "[PLAY_MP3]") {
-                            playMp3FromSD("/response.mp3");
-                        } else {
-                            tts.speak(answer, configMgr.config);
-                        }
-                    }
-                    setState(STATE_IDLE);
+                    handleRecordingDone();
                     return;
                 }
             } else {
@@ -1178,19 +1205,7 @@ void loop() {
         
         if (buffer_full || btnStop || timeout) {
             Serial.printf("[REC] Stop recording: buffer_full=%d, btnStop=%d, timeout=%d\n", buffer_full, btnStop, timeout);
-            String path = recorder.stopAndSave();
-            
-            if (path.length() > 0 && wifiConnected) {
-                setState(STATE_THINKING);
-                String answer = agent.askAI(path, configMgr.config);
-                setState(STATE_SPEAKING);
-                if (answer == "[PLAY_MP3]") {
-                    playMp3FromSD("/response.mp3");
-                } else {
-                    tts.speak(answer, configMgr.config);
-                }
-            }
-            setState(STATE_IDLE);
+            handleRecordingDone();
         }
     }
 

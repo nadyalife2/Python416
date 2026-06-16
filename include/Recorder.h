@@ -55,6 +55,14 @@ public:
         Serial.println("[REC] Recording started...");
     }
 
+    void prependBuffer(const int16_t* preroll, size_t samples) {
+        if (samples > 0 && phrase_buf && (phrase_frames + samples) < REC_PHRASE_MAX) {
+            memmove(phrase_buf + samples, phrase_buf, phrase_frames * sizeof(int16_t));
+            memcpy(phrase_buf, preroll, samples * sizeof(int16_t));
+            phrase_frames += samples;
+        }
+    }
+
     bool process() {
         if (!in_speech || !rx_handle || !phrase_buf) return false;
         size_t br = 0;

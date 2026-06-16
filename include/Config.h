@@ -23,6 +23,7 @@ struct MelvinConfig {
     String wake_word;    // e.g., "Мелвин"
     String system_prompt; // Custom prompt if none of the above
     String api_proxy;    // Local API proxy to bypass geoblocking (e.g. "http://192.168.31.123:8080")
+    String tts_language; // "ru", "en", "de" etc.
     
     MelvinConfig() {
         llm_provider = "groq";    // Gemini геоблокирован в России, Groq работает
@@ -32,6 +33,7 @@ struct MelvinConfig {
         wake_word = "Мелвин";
         rss_url = "https://lenta.ru/rss/news";
         api_proxy = "http://192.168.31.123:8080";
+        tts_language = "ru";
     }
 
     String getEffectivePrompt() const {
@@ -46,6 +48,14 @@ struct MelvinConfig {
             base = system_prompt;
         }
         return "Твое имя: " + wake_word + ". " + base;
+    }
+
+    String getActiveKeys() const {
+        if (llm_provider == "gemini") return gemini_keys;
+        if (llm_provider == "groq") return groq_keys;
+        if (llm_provider == "openrouter") return openrouter_keys;
+        if (llm_provider == "yandex") return yandex_keys;
+        return "";
     }
 };
 
@@ -75,6 +85,7 @@ public:
         config.wake_word = doc["wake_word"] | "Мелвин";
         config.rss_url = doc["rss_url"] | "https://lenta.ru/rss/news";
         config.system_prompt = doc["system_prompt"] | "";
+        config.tts_language = doc["tts_language"] | "ru";
         
         String proxy = doc["api_proxy"] | "http://192.168.31.123:8080";
         proxy.trim();
@@ -118,6 +129,7 @@ public:
         doc["rss_url"] = config.rss_url;
         doc["system_prompt"] = config.system_prompt;
         doc["api_proxy"] = config.api_proxy;
+        doc["tts_language"] = config.tts_language;
         serializeJson(doc, file);
         file.close();
         return true;

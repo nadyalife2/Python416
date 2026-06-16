@@ -174,6 +174,12 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 <input type="password" id="tts_key" placeholder="Ключ для TTS..." autocomplete="off">
 <button class="eye-btn" onclick="toggleVis('tts_key',this)">👁</button>
 </div>
+<label>Язык TTS</label>
+<select id="tts_language">
+    <option value="ru">Русский</option>
+    <option value="en">English</option>
+    <option value="de">Deutsch</option>
+</select>
 <label>Голос</label>
 <input type="text" id="tts_voice" placeholder="ru-RU-Wavenet-B">
 <div class="hint">Для Google: ru-RU-Wavenet-B, ru-RU-Wavenet-D и т.д.</div>
@@ -230,6 +236,8 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 <div class="stat-card"><div class="stat-val" id="s-psram">—</div><div class="stat-lbl">PSRAM (KB)</div></div>
 <div class="stat-card"><div class="stat-val" id="s-uptime">—</div><div class="stat-lbl">Uptime (с)</div></div>
 <div class="stat-card"><div class="stat-val" id="s-rssi">—</div><div class="stat-lbl">RSSI (dBm)</div></div>
+<div class="stat-card"><div class="stat-val" id="s-sd">—</div><div class="stat-lbl">SD карта</div></div>
+<div class="stat-card"><div class="stat-val" id="s-history">—</div><div class="stat-lbl">История</div></div>
 </div>
 </div>
 <div class="card">
@@ -310,13 +318,27 @@ function loadConfig(){
     if(d.tts_provider)document.getElementById('tts_provider').value=d.tts_provider;
     if(d.llm_provider)setLLM(d.llm_provider);
     if(d.personality)setPersonality(d.personality);
+    if(d.tts_language)document.getElementById('tts_language').value=d.tts_language;
   }).catch(function(){toast('Ошибка загрузки конфига','error');});
 }
 
 function saveAll(){
+  if (gv('wifi_ssid').length < 2) {
+    toast('⚠️ Введите имя WiFi сети', 'error'); return;
+  }
+  var ykeys = gv('yandex_keys');
+  if (ykeys.length > 0 && !ykeys.includes(':')) {
+    toast('⚠️ Yandex ключ: формат FolderID:ApiKey', 'error'); return;
+  }
+  var proxy = gv('api_proxy');
+  if (proxy.length > 0 && !proxy.startsWith('http')) {
+    toast('⚠️ Прокси должен начинаться с http://', 'error'); return;
+  }
+
+  var wifiPass = gv('wifi_pass');
   var data={
     wifi_ssid:gv('wifi_ssid'),
-    wifi_pass:gv('wifi_pass'),
+    wifi_pass:wifiPass.length > 0 ? wifiPass : '__KEEP__',
     gemini_keys:gv('gemini_keys'),
     groq_keys:gv('groq_keys'),
     openrouter_keys:gv('openrouter_keys'),
@@ -329,7 +351,8 @@ function saveAll(){
     personality:_pers,
     wake_word:gv('wake_word'),
     system_prompt:gv('system_prompt'),
-    rss_url:gv('rss_url')
+    rss_url:gv('rss_url'),
+    tts_language:document.getElementById('tts_language').value
   };
   fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
   .then(function(r){
@@ -359,17 +382,37 @@ function doDeleteHistory(){
   }).catch(function(){toast('Нет связи','error');});
 }
 
+function stateLabel(s) {
+  var labels = {
+    'IDLE':       'Ожидание',
+    'RECORDING':  'Слушаю...',
+    'THINKING':   'Думаю...',
+    'SPEAKING':   'Говорю',
+    'BOOT':       'Загрузка',
+    'ERROR':      'Ошибка',
+    'CONFIG_AP':  'Точка доступа',
+    'CONNECTING': 'Подключение к WiFi'
+  };
+  return labels[s] || s;
+}
+
 function updateStatus(){
   fetch('/api/status').then(function(r){return r.json();}).then(function(d){
     document.getElementById('s-heap').textContent=d.heap?Math.round(d.heap/1024):'—';
     document.getElementById('s-psram').textContent=d.psram?Math.round(d.psram/1024):'—';
     document.getElementById('s-uptime').textContent=d.uptime||'—';
     document.getElementById('s-rssi').textContent=d.rssi||'—';
-    document.getElementById('state-badge').textContent=stateEmoji(d.state)+' '+(d.state||'?');
+    document.getElementById('state-badge').textContent=stateEmoji(d.state)+' '+stateLabel(d.state||'?');
     var rssi=d.rssi||0;
     document.getElementById('rssi-fill').style.width=Math.max(0,Math.min(100,(rssi+90)*2))+'%';
     document.getElementById('rssi-text').textContent='RSSI: '+(rssi?rssi+' dBm':'—');
     document.getElementById('wifi-status-text').textContent=rssi?'Подключено ('+rssi+' dBm)':'Не в сети';
+    
+    if (d.sd_ok === false) {
+      toast('⚠️ SD карта не найдена!', 'error');
+    }
+    document.getElementById('s-sd').textContent = d.sd_ok ? (Math.round(d.sd_used_kb) + '/' + Math.round(d.sd_total_kb) + ' KB') : 'Не найдена';
+    document.getElementById('s-history').textContent = d.sd_ok ? (Math.round(d.history_kb) + ' KB') : '—';
   }).catch(function(){
     document.getElementById('state-badge').textContent='❓ Нет данных';
   });
@@ -404,6 +447,7 @@ function stopStatus(){
 })();
 
 loadConfig();
+updateStatus(); // обновить RSSI сразу при загрузке страницы
 </script>
 </body>
 </html>)rawliteral";

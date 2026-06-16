@@ -55,6 +55,26 @@ static String urlEncode(const String& src) {
 
 class MelvinTTS {
 public:
+    volatile bool tts_playing = false;
+
+    struct TtsTask {
+        MelvinTTS* tts;
+        String text;
+        MelvinConfig cfg;
+    };
+
+    void speakAsync(const String& text, const MelvinConfig& cfg) {
+        static TtsTask params;
+        params = {this, text, cfg};
+        xTaskCreate([](void* arg) {
+            auto* p = (TtsTask*)arg;
+            p->tts->tts_playing = true;
+            p->tts->speak(p->text, p->cfg);
+            p->tts->tts_playing = false;
+            vTaskDelete(NULL);
+        }, "tts", 8192, &params, 5, nullptr);
+    }
+
     bool begin() { return true; }
 
     void speak(String text, const MelvinConfig& cfg) {
@@ -94,18 +114,34 @@ public:
     }
 
     void speakRandomPhrase() {
+        // Только нейтральные/error фразы как fallback при ошибке TTS
         const char* candidates[] = {
-            "/hello.wav", "/ready.wav", "/ok.wav", "/beep.wav",
-            "/phrase1.wav", "/phrase2.wav", "/phrase3.wav"
+            "/error.wav", "/phrase1.wav", "/phrase2.wav", "/phrase3.wav", "/beep.wav"
         };
         int num = sizeof(candidates) / sizeof(candidates[0]);
-        const char* avail[7];
+        const char* avail[5];
         int cnt = 0;
         for (int i = 0; i < num; i++) {
             if (SD_MMC.exists(candidates[i])) avail[cnt++] = candidates[i];
         }
         if (cnt == 0) {
             Serial.println("[TTS] No WAV files found on SD");
+            return;
+        }
+        int idx = esp_random() % cnt;
+        playWavFromSD(avail[idx]);
+    }
+
+    void speakGreeting() {
+        const char* candidates[] = { "/hello.wav", "/ready.wav", "/ok.wav" };
+        int num = sizeof(candidates) / sizeof(candidates[0]);
+        const char* avail[3];
+        int cnt = 0;
+        for (int i = 0; i < num; i++) {
+            if (SD_MMC.exists(candidates[i])) avail[cnt++] = candidates[i];
+        }
+        if (cnt == 0) {
+            Serial.println("[TTS] No greeting WAV files found on SD");
             return;
         }
         int idx = esp_random() % cnt;
@@ -154,11 +190,7 @@ private:
         }
 
         // DMA drain
-        static const int16_t silence[512] = {0};
-        size_t w = 0;
-        for (int i = 0; i < 24; i++) {
-            i2s_channel_write(tx_handle, (const void*)silence, sizeof(silence), &w, portMAX_DELAY);
-        }
+        drainI2S();
         digitalWrite(PA_CTRL_PIN, LOW);
         delay(150);
 
@@ -205,11 +237,7 @@ private:
             }
         }
 
-        static const int16_t silence[512] = {0};
-        size_t w = 0;
-        for (int i = 0; i < 24; i++) {
-            i2s_channel_write(tx_handle, (const void*)silence, sizeof(silence), &w, portMAX_DELAY);
-        }
+        drainI2S();
         digitalWrite(PA_CTRL_PIN, LOW);
         delay(150);
 
@@ -222,6 +250,13 @@ private:
         return !mp3_abort;
     }
 
+    void drainI2S() {
+        static const int16_t silence[512] = {0};
+        size_t w = 0;
+        for (int i = 0; i < 24; i++)
+            i2s_channel_write(tx_handle, silence, sizeof(silence), &w, portMAX_DELAY);
+    }
+
     // ============================================================
     // YANDEX SPEECHKIT — unsafe_mode allows long text in one request
     // ============================================================
@@ -232,15 +267,15 @@ private:
         }
         Serial.printf("[TTS][Yandex] Synthesizing %d chars...\n", text.length());
 
-        WiFiClientSecure* secureClient = new WiFiClientSecure();
-        secureClient->setInsecure();
-        HTTPClient* http = new HTTPClient();
-        http->setTimeout(30000);
-        http->setConnectTimeout(30000);
-        http->begin(*secureClient, "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize");
-        http->setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-        http->addHeader("Authorization", "Api-Key " + cfg.tts_key);
-        http->addHeader("Content-Type", "application/x-www-form-urlencoded");
+        WiFiClientSecure secureClient;
+        secureClient.setInsecure();
+        HTTPClient http;
+        http.setTimeout(30000);
+        http.setConnectTimeout(30000);
+        http.begin(secureClient, "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize");
+        http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+        http.addHeader("Authorization", "Api-Key " + cfg.tts_key);
+        http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
         String voice = (cfg.tts_voice.length() > 0) ? cfg.tts_voice : "filipp";
         String body = "text=" + urlEncode(text) +
@@ -251,19 +286,17 @@ private:
                       "&speed=1.0" +
                       "&unsafe_mode=true";
 
-        int code = http->POST(body);
+        int code = http.POST(body);
         Serial.printf("[TTS][Yandex] HTTP %d\n", code);
 
         bool ok = false;
         if (code == 200) {
-            ok = playPcmStream(http->getStream(), 16000, true);
+            ok = playPcmStream(http.getStream(), 16000, true);
         } else {
-            Serial.printf("[TTS][Yandex] Error %d: %s\n", code, http->getString().c_str());
+            Serial.printf("[TTS][Yandex] Error %d: %s\n", code, http.getString().c_str());
             if (SD_MMC.exists("/error.wav")) playWavFromSD("/error.wav");
         }
-        http->end();
-        delete http;
-        delete secureClient;
+        http.end();
         return ok;
     }
 
@@ -273,31 +306,31 @@ private:
     bool synthesizeGoogleFree(String text, const MelvinConfig& cfg) {
         Serial.printf("[TTS][GoogleFree] Synthesizing %d chars...\n", text.length());
 
-        WiFiClientSecure* secureClient = new WiFiClientSecure();
-        secureClient->setInsecure();
-        HTTPClient* http = new HTTPClient();
-        http->setTimeout(30000);
-        http->setConnectTimeout(30000);
+        WiFiClientSecure secureClient;
+        secureClient.setInsecure();
+        HTTPClient http;
+        http.setTimeout(30000);
+        http.setConnectTimeout(30000);
 
-        String url = "https://translate.google.com/translate_tts?ie=UTF-8&client=gtx&tl=ru&q=" + urlEncode(text);
-        http->begin(*secureClient, url);
-        http->setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-        http->addHeader("Referer", "https://translate.google.com/");
-        http->addHeader("Accept", "audio/mpeg");
+        String lang = (cfg.tts_language.length() > 0) ? cfg.tts_language : "ru";
+        String url = "https://translate.google.com/translate_tts?ie=UTF-8&client=gtx&tl="
+                     + lang + "&q=" + urlEncode(text);
+        http.begin(secureClient, url);
+        http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        http.addHeader("Referer", "https://translate.google.com/");
+        http.addHeader("Accept", "audio/mpeg");
 
-        int code = http->GET();
+        int code = http.GET();
         Serial.printf("[TTS][GoogleFree] HTTP %d\n", code);
 
         bool ok = false;
         if (code == 200) {
-            ok = playMp3Stream(http->getStream());
+            ok = playMp3Stream(http.getStream());
         } else {
-            Serial.printf("[TTS][GoogleFree] Error %d: %s\n", code, http->getString().c_str());
+            Serial.printf("[TTS][GoogleFree] Error %d: %s\n", code, http.getString().c_str());
             if (SD_MMC.exists("/error.wav")) playWavFromSD("/error.wav");
         }
-        http->end();
-        delete http;
-        delete secureClient;
+        http.end();
         return ok;
     }
 };
