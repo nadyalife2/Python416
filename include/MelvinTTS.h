@@ -82,14 +82,30 @@ public:
         text.replace("*", "");
         text.replace("`", "");
 
-        if (cfg.tts_provider == "yandex") {
-            if (!synthesizeYandex(text, cfg)) speakRandomPhrase();
-        } else if (cfg.tts_provider == "google_free") {
+        bool ok = trySpeak(text, cfg.tts_provider, cfg);
+
+        // Fallback к второму провайдеру
+        if (!ok && cfg.tts_provider2.length() > 0 && cfg.tts_provider2 != "none") {
+            Serial.println("[TTS] Primary failed, trying fallback provider...");
+            ok = trySpeak(text, cfg.tts_provider2, cfg);
+        }
+
+        if (!ok) speakRandomPhrase();
+    }
+
+    bool trySpeak(const String& text, const String& provider, const MelvinConfig& cfg) {
+        if (provider == "yandex") {
+            return synthesizeYandex(text, cfg);
+        } else if (provider == "google_free") {
             // Google Free TTS URL limit ~2000 chars; chunk to 180 for safety
             int len = text.length();
             int start = 0;
+            bool anyFailed = false;
             while (start < len) {
-                if (digitalRead(BOOT_BTN_PIN) == LOW) break;
+                if (digitalRead(BOOT_BTN_PIN) == LOW) {
+                    anyFailed = true;
+                    break;
+                }
                 int end = min(start + 180, len);
                 // Prefer split at space or punctuation
                 if (end < len) {
@@ -104,13 +120,16 @@ public:
                 String chunk = text.substring(start, end);
                 chunk.trim();
                 if (chunk.length() > 0) {
-                    if (!synthesizeGoogleFree(chunk, cfg)) break;
+                    if (!synthesizeGoogleFree(chunk, cfg)) {
+                        anyFailed = true;
+                        break;
+                    }
                 }
                 start = end;
             }
-        } else {
-            speakRandomPhrase();
+            return !anyFailed;
         }
+        return false;
     }
 
     void speakRandomPhrase() {
@@ -277,7 +296,7 @@ private:
         http.addHeader("Authorization", "Api-Key " + cfg.tts_key);
         http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
-        String voice = (cfg.tts_voice.length() > 0) ? cfg.tts_voice : "filipp";
+        String voice = (cfg.tts_voice_yandex.length() > 0) ? cfg.tts_voice_yandex : "filipp";
         String body = "text=" + urlEncode(text) +
                       "&lang=ru-RU" +
                       "&voice=" + voice +
@@ -312,7 +331,7 @@ private:
         http.setTimeout(30000);
         http.setConnectTimeout(30000);
 
-        String lang = (cfg.tts_language.length() > 0) ? cfg.tts_language : "ru";
+        String lang = (cfg.tts_voice_google.length() > 0) ? cfg.tts_voice_google : "ru";
         String url = "https://translate.google.com/translate_tts?ie=UTF-8&client=gtx&tl="
                      + lang + "&q=" + urlEncode(text);
         http.begin(secureClient, url);
@@ -322,6 +341,17 @@ private:
 
         int code = http.GET();
         Serial.printf("[TTS][GoogleFree] HTTP %d\n", code);
+        if (code == 429) {
+            Serial.println("[TTS][GoogleFree] Rate limited (429), retrying after 2s...");
+            http.end();
+            delay(2000);
+            http.begin(secureClient, url);
+            http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            http.addHeader("Referer", "https://translate.google.com/");
+            http.addHeader("Accept", "audio/mpeg");
+            code = http.GET();
+            Serial.printf("[TTS][GoogleFree] Retry HTTP %d\n", code);
+        }
 
         bool ok = false;
         if (code == 200) {

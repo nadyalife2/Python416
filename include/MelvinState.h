@@ -5,6 +5,7 @@ enum RobotState {
     STATE_CONFIG_AP,   // нет WiFi — точка доступа
     STATE_CONNECTING,  // подключение к WiFi
     STATE_IDLE,        // ждём кнопку
+    STATE_WAKE_CHECK,  // проверка кодового слова
     STATE_RECORDING,   // запись голоса
     STATE_THINKING,    // запрос к AI
     STATE_SPEAKING,    // воспроизведение ответа
@@ -17,6 +18,7 @@ inline const char* stateName(RobotState s) {
         case STATE_CONFIG_AP:  return "CONFIG";
         case STATE_CONNECTING: return "WiFi...";
         case STATE_IDLE:       return "IDLE";
+        case STATE_WAKE_CHECK: return "WAKE";
         case STATE_RECORDING:  return "REC";
         case STATE_THINKING:   return "THINK";
         case STATE_SPEAKING:   return "SPEAK";

@@ -330,6 +330,128 @@ public:
 class MelvinAgent {
 public:
     String lastTranscription;
+
+    String transcribeRaw(const int16_t* buf, size_t len, const MelvinConfig& cfg) {
+        String keys = cfg.groq_keys;
+        if (keys.length() < 5) {
+            return "Error: No Groq keys";
+        }
+        int firstComma = keys.indexOf(',');
+        String key = (firstComma == -1) ? keys : keys.substring(0, firstComma);
+        key.trim();
+
+        // 1. Build WAV file in PSRAM
+        size_t wavDataSize = len * sizeof(int16_t);
+        size_t wavTotalSize = 44 + wavDataSize;
+
+        // 2. Build multipart payload
+        String boundary = "----MelvinBoundary123456789";
+        String contentType = "multipart/form-data; boundary=" + boundary;
+        String headerPart = "--" + boundary + "\r\n"
+                            "Content-Disposition: form-data; name=\"model\"\r\n\r\n"
+                            "whisper-large-v3-turbo\r\n"
+                            "--" + boundary + "\r\n"
+                            "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
+                            "Content-Type: audio/wav\r\n\r\n";
+        String footerPart = "\r\n--" + boundary + "--\r\n";
+        size_t totalPayloadSize = headerPart.length() + wavTotalSize + footerPart.length();
+
+        uint8_t* psramBuf = (uint8_t*)heap_caps_malloc(totalPayloadSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!psramBuf) {
+            psramBuf = (uint8_t*)malloc(totalPayloadSize);
+        }
+        if (!psramBuf) return "Error: Memory allocation failed for transcribeRaw";
+
+        // Copy headerPart
+        size_t offset = 0;
+        memcpy(psramBuf + offset, headerPart.c_str(), headerPart.length());
+        offset += headerPart.length();
+
+        // Write WAV header
+        struct {
+            char chunkId[4] = {'R', 'I', 'F', 'F'};
+            uint32_t chunkSize;
+            char format[4] = {'W', 'A', 'V', 'E'};
+            char subchunk1Id[4] = {'f', 'm', 't', ' '};
+            uint32_t subchunk1Size = 16;
+            uint16_t audioFormat = 1; // PCM
+            uint16_t numChannels = 1;
+            uint32_t sampleRate = 16000;
+            uint32_t byteRate = 32000;
+            uint16_t blockAlign = 2;
+            uint16_t bitsPerSample = 16;
+            char subchunk2Id[4] = {'d', 'a', 't', 'a'};
+            uint32_t subchunk2Size;
+        } wavHeader;
+        wavHeader.chunkSize = 36 + wavDataSize;
+        wavHeader.subchunk2Size = wavDataSize;
+
+        memcpy(psramBuf + offset, &wavHeader, sizeof(wavHeader));
+        offset += sizeof(wavHeader);
+
+        // Copy audio data
+        memcpy(psramBuf + offset, buf, wavDataSize);
+        offset += wavDataSize;
+
+        // Copy footerPart
+        memcpy(psramBuf + offset, footerPart.c_str(), footerPart.length());
+        offset += footerPart.length();
+        totalPayloadSize = offset;
+
+        // 3. Send HTTP request
+        String result;
+        String url = "https://api.groq.com/openai/v1/audio/transcriptions";
+        if (cfg.api_proxy.length() > 0) {
+            url = cfg.api_proxy + "/groq/openai/v1/audio/transcriptions";
+        }
+
+        PSRAMReadStream psStream(psramBuf, totalPayloadSize);
+
+        if (cfg.api_proxy.length() > 0) {
+            String resp = sendCustomPost(url, &psStream, totalPayloadSize, contentType, "Bearer " + key);
+            free(psramBuf);
+            if (resp.startsWith("Error")) {
+                result = resp;
+            } else {
+                JsonDocument doc;
+                DeserializationError err = deserializeJson(doc, resp);
+                if (err == DeserializationError::Ok) {
+                    result = doc["text"].as<String>();
+                } else {
+                    result = "Error: Groq JSON parse failed";
+                }
+            }
+        } else {
+            WiFiClientSecure secureClient;
+            secureClient.setTimeout(15000); // faster timeout for wake word check
+            secureClient.setConnectionTimeout(10000);
+            HTTPClient http;
+            http.setTimeout(15000);
+            http.setConnectTimeout(10000);
+
+            secureClient.setInsecure();
+            http.begin(secureClient, url);
+            http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+            http.addHeader("Authorization", "Bearer " + key);
+            http.addHeader("Content-Type", contentType);
+
+            int code = http.sendRequest("POST", &psStream, totalPayloadSize);
+            free(psramBuf);
+
+            if (code == 200) {
+                String resp = http.getString();
+                JsonDocument doc;
+                deserializeJson(doc, resp);
+                result = doc["text"].as<String>();
+            } else {
+                String err = http.getString();
+                result = "Error: Groq STT failed (" + String(code) + "): " + err;
+            }
+            http.end();
+        }
+        return result;
+    }
+
     // --- Infinite Memory (SD-Backed JSONL Format) ---
     void appendToHistory(String role, String text) {
         File file = SD_MMC.open("/history.jsonl", FILE_APPEND);

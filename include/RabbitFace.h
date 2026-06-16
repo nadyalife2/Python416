@@ -241,6 +241,26 @@ inline void drawRabbitError(lgfx::LovyanGFX& d, uint32_t tick) {
 inline void drawFace(lgfx::LovyanGFX& d, RobotState state, uint32_t tick) {
     switch (state) {
         case STATE_IDLE:       drawRabbitIdle(d, tick);       break;
+        case STATE_WAKE_CHECK:
+            d.fillScreen(COL_BG);
+            _drawRabbitBase(d);
+            {
+                bool blink = (tick % 100 > 95);
+                if (blink) {
+                    d.drawArc(97,  138, 14, 10, 200, 340, COL_DARK);
+                    d.drawArc(143, 138, 14, 10, 200, 340, COL_DARK);
+                } else {
+                    d.fillEllipse(97,  138, 16, 13, COL_DARK);
+                    d.fillEllipse(143, 138, 16, 13, COL_DARK);
+                    d.fillCircle(103, 133, 5, COL_SHINE);
+                    d.fillCircle(149, 133, 5, COL_SHINE);
+                }
+            }
+            d.drawArc(120, 175, 14, 10, 210, 330, COL_DARK);
+            d.setTextColor(COL_CYAN);
+            d.setCursor(68, 232);
+            d.print("СЛУШАЮ СЛОВО...");
+            break;
         case STATE_RECORDING:  drawRabbitRecording(d, tick);  break;
         case STATE_THINKING:   drawRabbitThinking(d, tick);   break;
         case STATE_SPEAKING:   drawRabbitSpeaking(d, tick);   break;

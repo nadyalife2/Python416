@@ -580,6 +580,9 @@ bool playMp3FromSD(const char* path) {
 // VAD buffers declared at file scope so setState() can reset the index cleanly
 static int16_t s_vad_buf[480] = {0}; // 30ms @ 16kHz
 static int     s_vad_buf_idx  = 0;
+static int16_t* s_pre_buf     = nullptr;
+static int     s_pre_buf_idx  = 0;
+static uint32_t wakeCheckStartMs = 0;
 
 void setState(RobotState s) {
     if (currentState == s) return;
@@ -628,9 +631,14 @@ void startWebServer() {
         doc["llm_provider"]     = configMgr.config.llm_provider;
         doc["tts_key"]          = configMgr.config.tts_key;
         doc["tts_provider"]     = configMgr.config.tts_provider;
+        doc["tts_provider2"]    = configMgr.config.tts_provider2;
         doc["tts_voice"]        = configMgr.config.tts_voice;
+        doc["tts_voice_yandex"] = configMgr.config.tts_voice_yandex;
+        doc["tts_voice_google"] = configMgr.config.tts_voice_google;
         doc["personality"]      = configMgr.config.personality;
         doc["wake_word"]        = configMgr.config.wake_word;
+        doc["wake_word_enabled"]= configMgr.config.wake_word_enabled;
+        doc["vad_silence_ms"]   = configMgr.config.vad_silence_ms;
         doc["rss_url"]          = configMgr.config.rss_url;
         doc["system_prompt"]    = configMgr.config.system_prompt;
         doc["api_proxy"]        = configMgr.config.api_proxy;
@@ -665,9 +673,14 @@ void startWebServer() {
                     configMgr.config.llm_provider     = doc["llm_provider"]     | configMgr.config.llm_provider;
                     configMgr.config.tts_key          = doc["tts_key"]          | configMgr.config.tts_key;
                     configMgr.config.tts_provider     = doc["tts_provider"]     | configMgr.config.tts_provider;
+                    configMgr.config.tts_provider2    = doc["tts_provider2"]    | configMgr.config.tts_provider2;
                     configMgr.config.tts_voice        = doc["tts_voice"]        | configMgr.config.tts_voice;
+                    configMgr.config.tts_voice_yandex = doc["tts_voice_yandex"] | configMgr.config.tts_voice_yandex;
+                    configMgr.config.tts_voice_google = doc["tts_voice_google"] | configMgr.config.tts_voice_google;
                     configMgr.config.personality      = doc["personality"]      | configMgr.config.personality;
                     configMgr.config.wake_word        = doc["wake_word"]        | configMgr.config.wake_word;
+                    configMgr.config.wake_word_enabled = doc["wake_word_enabled"] | configMgr.config.wake_word_enabled;
+                    configMgr.config.vad_silence_ms   = doc["vad_silence_ms"]   | configMgr.config.vad_silence_ms;
                     configMgr.config.rss_url          = doc["rss_url"]          | configMgr.config.rss_url;
                     configMgr.config.system_prompt    = doc["system_prompt"]    | configMgr.config.system_prompt;
                     configMgr.config.api_proxy        = doc["api_proxy"]        | configMgr.config.api_proxy;
@@ -836,6 +849,24 @@ void startWebServer() {
         serializeJson(doc, body);
         AsyncWebServerResponse* res = req->beginResponse(200, "application/json", body);
         res->addHeader("Access-Control-Allow-Origin", "*");
+        req->send(res);
+    });
+
+    // --------------------------------------------------------
+    // POST /api/test-tts — Тестовое воспроизведение TTS
+    // --------------------------------------------------------
+    server.on("/api/test-tts", HTTP_POST, [](AsyncWebServerRequest* req) {
+        tts.speakAsync("Привет, я Мелвин. TTS работает нормально.", configMgr.config);
+        AsyncWebServerResponse* res = req->beginResponse(200, "text/plain", "OK");
+        res->addHeader("Access-Control-Allow-Origin", "*");
+        req->send(res);
+    });
+
+    server.on("/api/test-tts", HTTP_OPTIONS, [](AsyncWebServerRequest* req) {
+        AsyncWebServerResponse* res = req->beginResponse(204);
+        res->addHeader("Access-Control-Allow-Origin", "*");
+        res->addHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+        res->addHeader("Access-Control-Allow-Headers", "Content-Type");
         req->send(res);
     });
 
@@ -1040,6 +1071,22 @@ void setup() {
             delay(500);
         }
     }
+
+    // 6b. Pre-buffer allocation (PSRAM allocation — 48KB)
+    s_pre_buf = (int16_t*)heap_caps_malloc(24000 * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_pre_buf) {
+        s_pre_buf = (int16_t*)malloc(24000 * sizeof(int16_t));
+    }
+    if (!s_pre_buf) {
+        Serial.println("[SETUP] FATAL: Pre-buffer allocation failed!");
+        setState(STATE_ERROR);
+        while (true) {
+            animTick++;
+            drawFace(canvas, STATE_ERROR, animTick);
+            canvas.pushSprite(0, 0);
+            delay(500);
+        }
+    }
     
     // Background auto-reconnection setup
     WiFi.setAutoReconnect(true);
@@ -1125,23 +1172,33 @@ void loop() {
 
     // --- Asynchronous Background WiFi Reconnect (non-blocking, works in ANY state) ---
     static uint32_t lastWifiCheckMs = 0;
+    static int wifiFailCount = 0;
     if (currentState != STATE_CONFIG_AP && now - lastWifiCheckMs > 15000) {
         lastWifiCheckMs = now;
         if (WiFi.status() != WL_CONNECTED) {
             wifiConnected = false;
             Serial.println("[WiFi] Connection lost! Triggering reconnect...");
             WiFi.reconnect(); // Явный реконнект — setAutoReconnect может не сработать после долгого разрыва
-        } else if (!wifiConnected) {
-            wifiConnected = true;
-            WiFi.setSleep(false); // CRITICAL: Keep Wi-Fi sleep disabled on reconnection!
-            esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-            if (netif != NULL) {
-                struct netif *lwip_netif = (struct netif *)esp_netif_get_netif_impl(netif);
-                if (lwip_netif != NULL) {
-                    lwip_netif->mtu = 1300;
-                }
+            wifiFailCount++;
+            if (wifiFailCount >= 20) { // 20 * 15s = 300s = 5 minutes
+                wifiFailCount = 0;
+                Serial.println("[WiFi] Too many failures, switching to AP mode");
+                startAPMode();
             }
-            Serial.println("[WiFi] Reconnected successfully!");
+        } else {
+            wifiFailCount = 0;
+            if (!wifiConnected) {
+                wifiConnected = true;
+                WiFi.setSleep(false); // CRITICAL: Keep Wi-Fi sleep disabled on reconnection!
+                esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+                if (netif != NULL) {
+                    struct netif *lwip_netif = (struct netif *)esp_netif_get_netif_impl(netif);
+                    if (lwip_netif != NULL) {
+                        lwip_netif->mtu = 1300;
+                    }
+                }
+                Serial.println("[WiFi] Reconnected successfully!");
+            }
         }
     }
 
@@ -1168,14 +1225,81 @@ void loop() {
                 if (s_vad_buf_idx >= 480) {
                     if (vad_process(vad_inst, s_vad_buf, SAMPLE_RATE, 30) == VAD_SPEECH) {
                         Serial.println("[VAD] Speech detected!");
-                        recorder.startRecording();
-                        recorder.prependBuffer(s_vad_buf, 480);
-                        recStartMs = now;
-                        silenceStartMs = now + 1500;
-                        setState(STATE_RECORDING);
+                        if (!configMgr.config.wake_word_enabled) {
+                            recorder.startRecording();
+                            recorder.prependBuffer(s_vad_buf, 480);
+                            recStartMs = now;
+                            silenceStartMs = now + configMgr.config.vad_silence_ms;
+                            setState(STATE_RECORDING);
+                        } else {
+                            setState(STATE_WAKE_CHECK);
+                            if (s_pre_buf) {
+                                memcpy(s_pre_buf, s_vad_buf, 480 * sizeof(int16_t));
+                                s_pre_buf_idx = 480;
+                            } else {
+                                s_pre_buf_idx = 0;
+                            }
+                            wakeCheckStartMs = now;
+                        }
                     }
                     s_vad_buf_idx = 0;
                 }
+            }
+        }
+    }
+
+    if (currentState == STATE_WAKE_CHECK) {
+        if (btnClicked) {
+            Serial.println("[WAKE] Wake check aborted by button, starting manual recording...");
+            recorder.startRecording();
+            recStartMs = now;
+            silenceStartMs = now + 1000;
+            setState(STATE_RECORDING);
+            return;
+        }
+
+        int16_t temp_buf[64];
+        size_t br = 0;
+        if (i2s_channel_read(rx_handle, temp_buf, sizeof(temp_buf), &br, pdMS_TO_TICKS(5)) == ESP_OK && br > 0) {
+            int samples_read = br / 2;
+            int space = 24000 - s_pre_buf_idx;
+            int to_copy = min(samples_read, space);
+            if (to_copy > 0 && s_pre_buf) {
+                memcpy(s_pre_buf + s_pre_buf_idx, temp_buf, to_copy * sizeof(int16_t));
+                s_pre_buf_idx += to_copy;
+            }
+        }
+        
+        // Timeout if transcription or collection takes too long (e.g. 8s)
+        if (now - wakeCheckStartMs > 8000) {
+            Serial.println("[WAKE] Wake check timeout, returning to IDLE");
+            setState(STATE_IDLE);
+        }
+        else if (s_pre_buf_idx >= 24000) {
+            Serial.println("[WAKE] 1.5s of pre-buffer collected, checking wake word...");
+            String text = agent.transcribeRaw(s_pre_buf, 24000, configMgr.config);
+            text.trim();
+            Serial.printf("[WAKE] Transcribed text: '%s'\n", text.c_str());
+            
+            String cleanText = text;
+            cleanText.toLowerCase();
+            String cleanWakeWord = configMgr.config.wake_word;
+            cleanWakeWord.toLowerCase();
+            
+            if (cleanText.length() > 0 && cleanText.indexOf(cleanWakeWord) != -1) {
+                Serial.println("[WAKE] Wake word detected!");
+                if (sdReady && SD_MMC.exists("/beep.wav")) {
+                    playWavFromSD("/beep.wav");
+                }
+                recorder.startRecording();
+                recorder.prependBuffer(s_pre_buf, 24000);
+                recStartMs = millis();
+                silenceStartMs = millis();
+                setState(STATE_RECORDING);
+                vad_processed_frames = recorder.getFrameCount();
+            } else {
+                Serial.println("[WAKE] Wake word NOT detected, returning to IDLE");
+                setState(STATE_IDLE);
             }
         }
     }
@@ -1189,7 +1313,7 @@ void loop() {
         if (phrase_buf && (current_frames - vad_processed_frames >= 480)) {
             int16_t* frame_ptr = &phrase_buf[vad_processed_frames];
             if (vad_process(vad_inst, frame_ptr, SAMPLE_RATE, 30) == VAD_SILENCE) {
-                if (now > silenceStartMs && now - silenceStartMs > 1500) { // 1.5 seconds of silence
+                if (now > silenceStartMs && now - silenceStartMs > configMgr.config.vad_silence_ms) {
                     Serial.println("[VAD] Silence detected → stop");
                     handleRecordingDone();
                     return;

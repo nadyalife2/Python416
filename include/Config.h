@@ -24,6 +24,11 @@ struct MelvinConfig {
     String system_prompt; // Custom prompt if none of the above
     String api_proxy;    // Local API proxy to bypass geoblocking (e.g. "http://192.168.31.123:8080")
     String tts_language; // "ru", "en", "de" etc.
+    String tts_provider2;      // Fallback TTS провайдер (если основной упал)
+    bool   wake_word_enabled;  // true = активация по слову, false = только кнопка BOOT
+    int    vad_silence_ms;     // Настраиваемая пауза тишины (сейчас hardcode 1500ms)
+    String tts_voice_yandex;   // Голос для Yandex отдельно (например "filipp")
+    String tts_voice_google;   // Голос/язык для Google отдельно (например "ru")
     
     MelvinConfig() {
         llm_provider = "groq";    // Gemini геоблокирован в России, Groq работает
@@ -34,6 +39,11 @@ struct MelvinConfig {
         rss_url = "https://lenta.ru/rss/news";
         api_proxy = "http://192.168.31.123:8080";
         tts_language = "ru";
+        tts_provider2     = "none";
+        wake_word_enabled = false;   // По умолчанию — только кнопка
+        vad_silence_ms    = 1500;
+        tts_voice_yandex  = "filipp";
+        tts_voice_google  = "ru";
     }
 
     String getEffectivePrompt() const {
@@ -86,6 +96,11 @@ public:
         config.rss_url = doc["rss_url"] | "https://lenta.ru/rss/news";
         config.system_prompt = doc["system_prompt"] | "";
         config.tts_language = doc["tts_language"] | "ru";
+        config.tts_provider2     = doc["tts_provider2"]     | "none";
+        config.wake_word_enabled = doc["wake_word_enabled"]  | false;
+        config.vad_silence_ms    = doc["vad_silence_ms"]     | 1500;
+        config.tts_voice_yandex  = doc["tts_voice_yandex"]   | "filipp";
+        config.tts_voice_google  = doc["tts_voice_google"]   | "ru";
         
         String proxy = doc["api_proxy"] | "http://192.168.31.123:8080";
         proxy.trim();
@@ -130,6 +145,11 @@ public:
         doc["system_prompt"] = config.system_prompt;
         doc["api_proxy"] = config.api_proxy;
         doc["tts_language"] = config.tts_language;
+        doc["tts_provider2"]     = config.tts_provider2;
+        doc["wake_word_enabled"] = config.wake_word_enabled;
+        doc["vad_silence_ms"]    = config.vad_silence_ms;
+        doc["tts_voice_yandex"]  = config.tts_voice_yandex;
+        doc["tts_voice_google"]  = config.tts_voice_google;
         serializeJson(doc, file);
         file.close();
         return true;

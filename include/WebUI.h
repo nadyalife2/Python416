@@ -163,26 +163,41 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 </div>
 <div class="card">
 <div class="card-title">TTS Синтез речи</div>
-<label>Провайдер TTS</label>
+<label>Основной провайдер TTS</label>
 <select id="tts_provider">
 <option value="none">Без TTS (выкл.)</option>
 <option value="yandex">Yandex SpeechKit (Поток LPCM)</option>
 <option value="google_free">Google Translate (Поток MP3)</option>
 </select>
-<label>TTS API ключ</label>
+
+<label>Резервный провайдер TTS</label>
+<select id="tts_provider2">
+<option value="none">Без TTS (выкл.)</option>
+<option value="yandex">Yandex SpeechKit (Поток LPCM)</option>
+<option value="google_free">Google Translate (Поток MP3)</option>
+</select>
+
+<div id="tts-key-block" style="display:none">
+<label>Yandex API ключ</label>
 <div class="inp-wrap">
-<input type="password" id="tts_key" placeholder="Ключ для TTS..." autocomplete="off">
+<input type="password" id="tts_key" placeholder="Ключ для Yandex TTS..." autocomplete="off">
 <button class="eye-btn" onclick="toggleVis('tts_key',this)">👁</button>
 </div>
-<label>Язык TTS</label>
-<select id="tts_language">
-    <option value="ru">Русский</option>
-    <option value="en">English</option>
-    <option value="de">Deutsch</option>
-</select>
-<label>Голос</label>
-<input type="text" id="tts_voice" placeholder="ru-RU-Wavenet-B">
-<div class="hint">Для Google: ru-RU-Wavenet-B, ru-RU-Wavenet-D и т.д.</div>
+</div>
+
+<div id="tts-voice-block" style="display:none">
+<label>Голос Yandex</label>
+<input type="text" id="tts_voice_yandex" placeholder="filipp">
+<div class="hint">Доступные голоса: filipp, alena, madirus, zahar и др.</div>
+</div>
+
+<div id="tts-lang-block" style="display:none">
+<label>Голос/Язык Google</label>
+<input type="text" id="tts_voice_google" placeholder="ru">
+<div class="hint">Код языка (например, ru, en, de, etc.)</div>
+</div>
+
+<button class="btn btn-secondary btn-sm" style="margin-top:12px" onclick="testTTS()">🔊 Тест голоса</button>
 </div>
 <button class="btn btn-primary" onclick="saveAll()">💾 Сохранить</button>
 </div>
@@ -215,12 +230,32 @@ select{-webkit-appearance:none;appearance:none;background-image:url("data:image/
 </div>
 <div class="card">
 <div class="card-title">Настройки</div>
-<label>Имя (слово-пробудитель)</label>
-<input type="text" id="wake_word" placeholder="Мелвин">
 <label>Системный промпт (для режима &quot;Свой&quot;)</label>
 <textarea id="system_prompt" placeholder="Ты — Мелвин, умный робот. Отвечай кратко на русском..."></textarea>
 <label>RSS лента новостей</label>
 <input type="text" id="rss_url" placeholder="https://lenta.ru/rss/news">
+</div>
+<div class="card">
+  <div class="card-title">🎤 Активация</div>
+  <label>Режим запуска</label>
+  <div style="margin-top:6px; display:flex; flex-direction:column; gap:8px;">
+    <label style="display:flex; align-items:center; gap:8px; margin:0; text-transform:none; font-size:13px; color:var(--text); font-weight:normal; cursor:pointer;">
+      <input type="radio" name="wake_mode" value="button" id="mode_button" style="width:auto; cursor:pointer;"> Кнопка BOOT (всегда работает)
+    </label>
+    <label style="display:flex; align-items:center; gap:8px; margin:0; text-transform:none; font-size:13px; color:var(--text); font-weight:normal; cursor:pointer;">
+      <input type="radio" name="wake_mode" value="word" id="mode_word" style="width:auto; cursor:pointer;"> По кодовому слову
+    </label>
+  </div>
+  <div id="wake-word-block" style="display:none; margin-top:10px;">
+    <label>Кодовое слово</label>
+    <input type="text" id="wake_word" placeholder="Мелвин / Melvin">
+    <div class="hint">⚠️ Пишите точно так, как произносите. Работает на кириллице и латинице.</div>
+  </div>
+  <div style="margin-top:10px;">
+    <label>Пауза тишины (VAD silence, мс)</label>
+    <input type="text" id="vad_silence_ms" placeholder="1500">
+    <div class="hint">Время тишины в миллисекундах перед остановкой записи.</div>
+  </div>
 </div>
 <button class="btn btn-primary" onclick="saveAll()">💾 Сохранить</button>
 </div>
@@ -311,14 +346,24 @@ function loadConfig(){
     sv('yandex_keys',d.yandex_keys);
     sv('api_proxy',d.api_proxy);
     sv('tts_key',d.tts_key);
-    sv('tts_voice',d.tts_voice);
+    sv('tts_voice_yandex',d.tts_voice_yandex);
+    sv('tts_voice_google',d.tts_voice_google);
     sv('wake_word',d.wake_word);
+    sv('vad_silence_ms',d.vad_silence_ms);
     sv('rss_url',d.rss_url);
     sv('system_prompt',d.system_prompt);
     if(d.tts_provider)document.getElementById('tts_provider').value=d.tts_provider;
+    if(d.tts_provider2)document.getElementById('tts_provider2').value=d.tts_provider2;
     if(d.llm_provider)setLLM(d.llm_provider);
     if(d.personality)setPersonality(d.personality);
-    if(d.tts_language)document.getElementById('tts_language').value=d.tts_language;
+    if(d.wake_word_enabled) {
+      document.getElementById('mode_word').checked = true;
+      document.getElementById('wake-word-block').style.display = 'block';
+    } else {
+      document.getElementById('mode_button').checked = true;
+      document.getElementById('wake-word-block').style.display = 'none';
+    }
+    updateTTSFields();
   }).catch(function(){toast('Ошибка загрузки конфига','error');});
 }
 
@@ -345,14 +390,19 @@ function saveAll(){
     yandex_keys:gv('yandex_keys'),
     api_proxy:gv('api_proxy'),
     tts_key:gv('tts_key'),
-    tts_voice:gv('tts_voice'),
     tts_provider:document.getElementById('tts_provider').value,
+    tts_provider2:document.getElementById('tts_provider2').value,
+    tts_voice_yandex:gv('tts_voice_yandex'),
+    tts_voice_google:gv('tts_voice_google'),
+    tts_voice:gv('tts_voice_yandex') || gv('tts_voice_google') || 'filipp',
     llm_provider:_llm,
     personality:_pers,
     wake_word:gv('wake_word'),
+    wake_word_enabled:document.getElementById('mode_word').checked,
+    vad_silence_ms:parseInt(gv('vad_silence_ms')) || 1500,
     system_prompt:gv('system_prompt'),
     rss_url:gv('rss_url'),
-    tts_language:document.getElementById('tts_language').value
+    tts_language:gv('tts_voice_google') || 'ru'
   };
   fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
   .then(function(r){
@@ -445,6 +495,40 @@ function stopStatus(){
   setInterval(doB,Math.random()*2000+2000);
   doB();
 })();
+
+function updateTTSFields() {
+    const provider = document.getElementById('tts_provider').value;
+    const provider2 = document.getElementById('tts_provider2').value;
+    
+    const needsKey = ['yandex'].includes(provider) || ['yandex'].includes(provider2);
+    const needsYandexVoice = ['yandex'].includes(provider) || ['yandex'].includes(provider2);
+    const needsGoogleVoice = ['google_free'].includes(provider) || ['google_free'].includes(provider2);
+
+    document.getElementById('tts-key-block').style.display   = needsKey ? 'block' : 'none';
+    document.getElementById('tts-voice-block').style.display = needsYandexVoice ? 'block' : 'none';
+    document.getElementById('tts-lang-block').style.display  = needsGoogleVoice ? 'block' : 'none';
+}
+
+function testTTS() {
+    fetch('/api/test-tts', {method: 'POST'})
+        .then(function(r){
+            if(r.ok){toast('Воспроизведение...','success');}
+            else{toast('Ошибка теста','error');}
+        }).catch(function(){toast('Нет связи','error');});
+}
+
+window.addEventListener('load', function() {
+    updateTTSFields();
+    document.getElementById('tts_provider').addEventListener('change', updateTTSFields);
+    document.getElementById('tts_provider2').addEventListener('change', updateTTSFields);
+    
+    document.querySelectorAll('input[name="wake_mode"]').forEach(r =>
+        r.addEventListener('change', () => {
+            const isWord = document.getElementById('mode_word').checked;
+            document.getElementById('wake-word-block').style.display = isWord ? 'block' : 'none';
+        })
+    );
+});
 
 loadConfig();
 updateStatus(); // обновить RSSI сразу при загрузке страницы
