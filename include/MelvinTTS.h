@@ -96,7 +96,7 @@ public:
     bool trySpeak(const String& text, const String& provider, const MelvinConfig& cfg) {
         if (provider == "yandex") {
             return synthesizeYandex(text, cfg);
-        } else if (provider == "google_free") {
+        } else if (provider == "google_free" || provider == "google") {
             // Google Free TTS URL limit ~2000 chars; chunk to 180 for safety
             int len = text.length();
             int start = 0;

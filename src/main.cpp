@@ -932,6 +932,7 @@ void connectWifi() {
     WiFi.setAutoReconnect(true);
     WiFi.setSleep(false); // CRITICAL: Disable Wi-Fi sleep to prevent TCP connection drops during slow Base64 streaming uploads!
     WiFi.begin(configMgr.config.wifi_ssid.c_str(), configMgr.config.wifi_pass.c_str());
+    WiFi.setTxPower(WIFI_POWER_8_5dBm); // Prevent power-induced WiFi disconnects (ASSOC_LEAVE) during heavy TLS TX
     
     uint32_t t = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t < 12000) {
@@ -1248,7 +1249,7 @@ void loop() {
                             recorder.startRecording();
                             recorder.prependBuffer(s_vad_buf, 480);
                             recStartMs = now;
-                            silenceStartMs = now + configMgr.config.vad_silence_ms;
+                            silenceStartMs = now;
                             setState(STATE_RECORDING);
                         } else {
                             setState(STATE_WAKE_CHECK);
@@ -1311,7 +1312,7 @@ void loop() {
                 recorder.startRecording();
                 recorder.prependBuffer(s_pre_buf, 24000);
                 recStartMs = millis();
-                silenceStartMs = millis() + configMgr.config.vad_silence_ms;
+                silenceStartMs = millis();
                 setState(STATE_RECORDING);
                 vad_processed_frames = recorder.getFrameCount();
             } else {

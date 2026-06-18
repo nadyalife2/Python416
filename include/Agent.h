@@ -11,6 +11,7 @@
 #include "Display.h"
 #include "RabbitFace.h"
 #include <mbedtls/base64.h>
+#include <vector>
 
 // Forward declarations for display redrawing during network transfer
 extern uint32_t lastRedrawMs;
@@ -52,8 +53,12 @@ private:
             size_t b64End = b64Start + (((fileSize + 2) / 3) * 4);
             if (streamPos < b64End) {
                 if (b64CacheIdx < b64CacheLen) {
-                    buffer[bytesRead++] = b64Buf[b64CacheIdx++];
-                    streamPos++;
+                    size_t chunk = b64CacheLen - b64CacheIdx;
+                    if (chunk > length - bytesRead) chunk = length - bytesRead;
+                    memcpy(buffer + bytesRead, b64Buf + b64CacheIdx, chunk);
+                    b64CacheIdx += chunk;
+                    bytesRead += chunk;
+                    streamPos += chunk;
                     continue;
                 }
                 if (!rawBuf || !b64Buf) {
@@ -65,8 +70,13 @@ private:
                     mbedtls_base64_encode((unsigned char*)b64Buf, 1028, &encLen, rawBuf, readBytes);
                     b64CacheLen = encLen;
                     b64CacheIdx = 0;
-                    buffer[bytesRead++] = b64Buf[b64CacheIdx++];
-                    streamPos++;
+                    
+                    size_t chunk = b64CacheLen - b64CacheIdx;
+                    if (chunk > length - bytesRead) chunk = length - bytesRead;
+                    memcpy(buffer + bytesRead, b64Buf + b64CacheIdx, chunk);
+                    b64CacheIdx += chunk;
+                    bytesRead += chunk;
+                    streamPos += chunk;
                 } else {
                     Serial.printf("[DEBUG] GeminiStream file.read returned 0! streamPos=%d, b64End=%d\n", streamPos, b64End);
                     break;
@@ -612,103 +622,76 @@ public:
     // --- Direct N8N Webhook POST ---
     String askAI(const String& audioPath, const MelvinConfig& cfg) {
         if (cfg.api_proxy.length() < 10) return "Error: webhook URL not configured.";
-        String url = cfg.api_proxy;
         
         File file = SD_MMC.open(audioPath, FILE_READ);
         if (!file) return "Error: Open audio failed";
         size_t fileSize = file.size();
 
-        // Build multipart envelope
-        String boundary = "----MelvinBoundary123456789";
-        String headerPart = "--" + boundary + "\r\n"
-                            "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
-                            "Content-Type: audio/wav\r\n\r\n";
-        String footerPart = "\r\n--" + boundary + "--\r\n";
-        size_t totalPayloadSize = headerPart.length() + fileSize + footerPart.length();
+        // 1. Send to n8n webhook using multipart/form-data stream to bypass Cloudflare JSON limits
+        String boundary = "----MelvinBoundary" + String(millis());
+        String header = "--" + boundary + "\r\n"
+                      + "Content-Disposition: form-data; name=\"data\"; filename=\"audio.wav\"\r\n"
+                      + "Content-Type: audio/wav\r\n\r\n";
+        String footer = "\r\n--" + boundary + "--\r\n";
+        
+        MultipartStream multipartStream(file, header, footer);
+        size_t totalLen = header.length() + fileSize + footer.length();
 
-        // Allocate PSRAM buffer for the entire payload
-        uint8_t* psramBuf = (uint8_t*)heap_caps_malloc(totalPayloadSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!psramBuf) {
-            file.close();
-            return "Error: PSRAM alloc failed for payload";
-        }
-
-        // Copy header
-        size_t offset = 0;
-        memcpy(psramBuf + offset, headerPart.c_str(), headerPart.length());
-        offset += headerPart.length();
-
-        // Copy WAV from SD into PSRAM (direct read, no stack buffer)
-        size_t bytesRead = 0;
-        while (bytesRead < fileSize) {
-            size_t toRead = min((size_t)4096, fileSize - bytesRead);
-            size_t r = file.read(psramBuf + offset, toRead);
-            if (r == 0) break;
-            offset += r;
-            bytesRead += r;
-        }
-        file.close();
-
-        // Copy footer
-        memcpy(psramBuf + offset, footerPart.c_str(), footerPart.length());
-        offset += footerPart.length();
-        totalPayloadSize = offset; // actual size after read
-
-        Serial.printf("[AGENT] POSTing %d bytes (PSRAM buffered) to %s\n", totalPayloadSize, url.c_str());
-
-        // Send using PSRAMReadStream — data flows from RAM at full speed, no SD latency
-        PSRAMReadStream psStream(psramBuf, totalPayloadSize);
-
-        WiFiClient client;
-        client.setTimeout(60000);
+        Serial.printf("[AGENT] Sending %d bytes (multipart) to n8n via HTTPClient...\n", totalLen);
+        
         WiFiClientSecure secureClient;
-        secureClient.setTimeout(60000);
         secureClient.setInsecure();
+        secureClient.setTimeout(30000);
+        secureClient.setConnectionTimeout(15000);
         
         HTTPClient http;
-        http.setTimeout(60000);
-        http.setConnectTimeout(30000);
-        
-        if (url.startsWith("https://")) {
-            http.begin(secureClient, url);
-        } else {
-            http.begin(client, url);
-        }
-        
-        http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+        http.setTimeout(30000);
+        http.setConnectTimeout(15000);
+
+        // Add ALPN protocols to alter TLS ClientHello fingerprint
+        const char* alpn[] = {"h2", "http/1.1", NULL};
+        secureClient.setAlpnProtocols(alpn);
+
+        http.begin(secureClient, cfg.api_proxy);
+        http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
         http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-        
-        int httpCode = http.sendRequest("POST", &psStream, totalPayloadSize);
-        free(psramBuf);
-        
-        String result;
-        if (httpCode > 0) {
-            if (httpCode == 200 || httpCode == 201) {
-                // n8n returns an MP3 file, so we must stream it directly to SD card
-                File outMp3 = SD_MMC.open("/response.mp3", FILE_WRITE);
-                if (outMp3) {
-                    int bytesWritten = http.writeToStream(&outMp3);
-                    outMp3.close();
-                    Serial.printf("[AGENT] Received MP3 payload: %d bytes saved to /response.mp3\n", bytesWritten);
-                    result = "[PLAY_MP3]";
-                } else {
-                    result = "Error: Failed to open /response.mp3 for writing";
-                }
-            } else {
-                String response = http.getString();
-                result = "Error: Server returned " + String(httpCode) + " " + response;
-            }
-        } else {
-            String err = http.errorToString(httpCode);
-            Serial.printf("[AGENT] HTTPClient POST failed: %s\n", err.c_str());
-            result = "Error: POST failed - " + err;
+        http.addHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        http.addHeader("Accept-Language", "en-US,en;q=0.5");
+        http.addHeader("Accept-Encoding", "gzip, deflate, br");
+        http.addHeader("Connection", "close");
+
+        String responseBody = sendCustomPost(cfg.api_proxy, &multipartStream, totalLen, "multipart/form-data; boundary=" + boundary, "");
+        if (responseBody.startsWith("Error")) {
+            Serial.println("[AGENT] sendCustomPost failed: " + responseBody);
         }
         
-        http.end();
-        
+        file.close(); // Ensure file is closed after stream
+
+
+        String result;
+        if (responseBody.startsWith("Error")) {
+            Serial.printf("[AGENT] sendCustomPost failed: %s\n", responseBody.c_str());
+            result = responseBody;
+        } else {
+            Serial.printf("[AGENT] Response received: %d bytes\n", responseBody.length());
+            
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, responseBody);
+            if (error) {
+                Serial.println("[AGENT] JSON parse failed!");
+                Serial.println(responseBody);
+                result = "Error: Failed to parse n8n response";
+            } else {
+                const char* text_spoken = doc["text_spoken"];
+                if (text_spoken) {
+                    result = String(text_spoken);
+                } else {
+                    result = "Error: No text_spoken in response";
+                }
+            }
+        }
+
         if (result.startsWith("Error")) {
-            // After a failed TLS upload, ESP32 socket table may be corrupted (errno 9).
-            // Force WiFi reconnect to flush all stale sockets before next request.
             Serial.println("[AGENT] POST failed — forcing WiFi reconnect to recover sockets...");
             WiFi.disconnect();
             delay(500);
@@ -799,20 +782,22 @@ private:
         // Send all headers in a single print to avoid packet fragmentation
         String req = "POST " + path + " HTTP/1.1\r\n" +
                      "Host: " + host + "\r\n" +
-                     "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n";
+                     "User-Agent: python-requests/2.31.0\r\n" +
+                     "Accept-Encoding: gzip, deflate\r\n";
         if (authHeader.length() > 0) {
             req += "Authorization: " + authHeader + "\r\n";
         }
         req += "Content-Type: " + contentType + "\r\n" +
                "Content-Length: " + String(payloadLength) + "\r\n" +
+               "Accept: */*\r\n" +
                "Connection: close\r\n\r\n";
         
         clientPtr->print(req);
 
         Serial.printf("[CUSTOM_HTTP] Sending payload (%d bytes)...\n", payloadLength);
         
-        // Use 256-byte chunks to fit easily in the TCP socket send buffer
-        uint8_t temp[256];
+        // Use 4096-byte chunks to minimize TLS fragmentation and overhead
+        std::vector<uint8_t> temp(4096);
         size_t remaining = payloadLength;
         uint32_t lastPrintMs = millis();
         uint32_t writeStartMs = millis();
@@ -835,8 +820,8 @@ private:
                 return "Error: client disconnected during write";
             }
 
-            size_t toRead = min(remaining, sizeof(temp));
-            size_t r = payloadStream->readBytes(temp, toRead);
+            size_t toRead = min(remaining, temp.size());
+            size_t r = payloadStream->readBytes(temp.data(), toRead);
             if (r == 0) {
                 Serial.println("[CUSTOM_HTTP] Error: Stream ended prematurely!");
                 clientPtr->stop();
@@ -859,7 +844,7 @@ private:
                     delete clientPtr;
                     return "Error: client disconnected during write loop";
                 }
-                int w = clientPtr->write(temp + written, r - written);
+                int w = clientPtr->write(temp.data() + written, r - written);
                 if (w < 0) {
                     delay(50); // wait a short bit for any response packets
                     if (clientPtr->available() > 0) {

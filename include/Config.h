@@ -37,7 +37,7 @@ struct MelvinConfig {
         personality = "rick";
         wake_word = "Мелвин";
         rss_url = "https://lenta.ru/rss/news";
-        api_proxy = "http://192.168.31.123:8080";
+        api_proxy = "https://hollabaugh.app.n8n.cloud/webhook/melvin";
         tts_language = "ru";
         tts_provider2     = "none";
         wake_word_enabled = false;   // По умолчанию — только кнопка
@@ -102,7 +102,7 @@ public:
         config.tts_voice_yandex  = doc["tts_voice_yandex"]   | "filipp";
         config.tts_voice_google  = doc["tts_voice_google"]   | "ru";
         
-        String proxy = doc["api_proxy"] | "http://192.168.31.123:8080";
+        String proxy = doc["api_proxy"] | "https://hollabaugh.app.n8n.cloud/webhook/melvin";
         proxy.trim();
         if (proxy.endsWith("/")) {
             proxy = proxy.substring(0, proxy.length() - 1);
