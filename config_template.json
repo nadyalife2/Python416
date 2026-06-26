@@ -8,6 +8,9 @@
   "ИНСТРУКЦИЯ_tts_key": "Ключ с console.cloud.google.com → APIs → Cloud Text-to-Speech API (нужен billing)",
   "tts_key": "AIzaSyBE-ofKFDyW9IbJv3x5xRyUmKxqWCFnQGk",
 
+  "ИНСТРУКЦИЯ_api_proxy": "URL n8n вебхука для отправки аудио (base64 JSON). Если указан — ВЕСЬ AI-пайплайн идёт через n8n!",
+  "api_proxy": "http://192.168.X.X:5678/webhook/ВАШ-UUID",
+
   "groq_keys": "",
   "openrouter_keys": "",
   "llm_provider": "gemini",

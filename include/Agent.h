@@ -215,6 +215,127 @@ public:
 };
 
 // ============================================================
+// Zero-Copy Streaming Class for Base64 JSON POST body (n8n bypass)
+// ============================================================
+class Base64JsonStream : public Stream {
+private:
+    File file;
+    size_t fileSize;
+    size_t filePos = 0;
+    
+    String header;
+    String footer = "\"}";
+    
+    size_t base64Len;
+    size_t totalLen;
+    size_t streamPos = 0;
+
+    uint8_t* buffer = nullptr;
+    size_t bufferLen = 0;
+    size_t bufferPos = 0;
+    
+    uint8_t* tempBuf = nullptr;
+
+    void fillBuffer() {
+        bufferLen = 0;
+        bufferPos = 0;
+
+        if (streamPos < header.length()) {
+            size_t chunk = header.length() - streamPos;
+            if (chunk > 4096) chunk = 4096;
+            memcpy(buffer, header.c_str() + streamPos, chunk);
+            bufferLen = chunk;
+            return;
+        }
+
+        size_t afterHeader = streamPos - header.length();
+        if (afterHeader < base64Len) {
+            // Read up to 3072 bytes (which encodes exactly to 4096 bytes base64)
+            size_t bytesToRead = 3072;
+            if (filePos + bytesToRead > fileSize) {
+                bytesToRead = fileSize - filePos;
+            }
+            if (bytesToRead == 0) return;
+
+            size_t r = file.read(tempBuf, bytesToRead);
+            if (r == 0) return;
+
+            size_t olen = 0;
+            // 4097 buffer size to allow mbedtls to write the null-terminator safely
+            int ret = mbedtls_base64_encode(buffer, 4097, &olen, tempBuf, r);
+            if (ret != 0) {
+                Serial.printf("Base64 encode error: -0x%04X\n", -ret);
+                return;
+            }
+            bufferLen = olen;
+            filePos += r;
+            return;
+        }
+
+        size_t afterBase64 = afterHeader - base64Len;
+        if (afterBase64 < footer.length()) {
+            size_t chunk = footer.length() - afterBase64;
+            if (chunk > 4096) chunk = 4096;
+            memcpy(buffer, footer.c_str() + afterBase64, chunk);
+            bufferLen = chunk;
+            return;
+        }
+    }
+
+public:
+    Base64JsonStream(File f) : file(f) {
+        fileSize = file.size();
+        header = "{\"audioSize\":" + String(fileSize) + ",\"audioBase64\":\"";
+        base64Len = ((fileSize + 2) / 3) * 4;
+        totalLen = header.length() + base64Len + footer.length();
+        
+        // Allocate buffers on heap to prevent stack overflow on ESP32 loopTask (8KB limit)
+        buffer = new uint8_t[4097];
+        tempBuf = new uint8_t[3072];
+    }
+
+    ~Base64JsonStream() {
+        if (buffer) delete[] buffer;
+        if (tempBuf) delete[] tempBuf;
+    }
+
+    size_t getTotalLen() const { return totalLen; }
+
+    int available() override {
+        return (int)(totalLen - streamPos);
+    }
+
+    size_t readBytes(uint8_t* buf, size_t len) override {
+        size_t got = 0;
+        while (got < len && streamPos < totalLen) {
+            if (bufferPos >= bufferLen) {
+                fillBuffer();
+                if (bufferLen == 0) break;
+            }
+            size_t chunk = min(len - got, bufferLen - bufferPos);
+            memcpy(buf + got, buffer + bufferPos, chunk);
+            bufferPos += chunk;
+            streamPos += chunk;
+            got += chunk;
+        }
+        return got;
+    }
+
+    size_t readBytes(char* buf, size_t len) override {
+        return readBytes((uint8_t*)buf, len);
+    }
+
+    int read() override {
+        uint8_t c;
+        return (readBytes(&c, 1) == 1) ? c : -1;
+    }
+
+    int peek() override { return -1; }
+    size_t write(uint8_t) override { return 0; }
+};
+
+
+// ============================================================
 // Zero-Copy Streaming Class for Yandex STT Raw LPCM POST body
 // ============================================================
 class LpcmStream : public Stream {
@@ -627,40 +748,13 @@ public:
         if (!file) return "Error: Open audio failed";
         size_t fileSize = file.size();
 
-        // 1. Send to n8n webhook using multipart/form-data stream to bypass Cloudflare JSON limits
-        String boundary = "----MelvinBoundary" + String(millis());
-        String header = "--" + boundary + "\r\n"
-                      + "Content-Disposition: form-data; name=\"data\"; filename=\"audio.wav\"\r\n"
-                      + "Content-Type: audio/wav\r\n\r\n";
-        String footer = "\r\n--" + boundary + "--\r\n";
+        // 1. Send to n8n webhook using base64 encoded JSON
+        Base64JsonStream b64Stream(file);
+        size_t totalLen = b64Stream.getTotalLen();
+
+        Serial.printf("[AGENT] Sending %d bytes (JSON base64) to n8n via sendCustomPost...\n", totalLen);
         
-        MultipartStream multipartStream(file, header, footer);
-        size_t totalLen = header.length() + fileSize + footer.length();
-
-        Serial.printf("[AGENT] Sending %d bytes (multipart) to n8n via HTTPClient...\n", totalLen);
-        
-        WiFiClientSecure secureClient;
-        secureClient.setInsecure();
-        secureClient.setTimeout(30000);
-        secureClient.setConnectionTimeout(15000);
-        
-        HTTPClient http;
-        http.setTimeout(30000);
-        http.setConnectTimeout(15000);
-
-        // Add ALPN protocols to alter TLS ClientHello fingerprint
-        const char* alpn[] = {"h2", "http/1.1", NULL};
-        secureClient.setAlpnProtocols(alpn);
-
-        http.begin(secureClient, cfg.api_proxy);
-        http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-        http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-        http.addHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-        http.addHeader("Accept-Language", "en-US,en;q=0.5");
-        http.addHeader("Accept-Encoding", "gzip, deflate, br");
-        http.addHeader("Connection", "close");
-
-        String responseBody = sendCustomPost(cfg.api_proxy, &multipartStream, totalLen, "multipart/form-data; boundary=" + boundary, "");
+        String responseBody = sendCustomPost(cfg.api_proxy, &b64Stream, totalLen, "application/json", "");
         if (responseBody.startsWith("Error")) {
             Serial.println("[AGENT] sendCustomPost failed: " + responseBody);
         }
@@ -762,9 +856,12 @@ private:
         WiFiClient* clientPtr = nullptr;
         WiFiClientSecure* secureClientPtr = nullptr;
 
+        const char* alpn[] = {"http/1.1", NULL};
+
         if (isHttps) {
             secureClientPtr = new WiFiClientSecure();
             secureClientPtr->setInsecure();
+            secureClientPtr->setAlpnProtocols(alpn);
             clientPtr = secureClientPtr;
         } else {
             clientPtr = new WiFiClient();
@@ -782,7 +879,7 @@ private:
         // Send all headers in a single print to avoid packet fragmentation
         String req = "POST " + path + " HTTP/1.1\r\n" +
                      "Host: " + host + "\r\n" +
-                     "User-Agent: python-requests/2.31.0\r\n" +
+                     "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n" +
                      "Accept-Encoding: gzip, deflate\r\n";
         if (authHeader.length() > 0) {
             req += "Authorization: " + authHeader + "\r\n";
@@ -873,6 +970,12 @@ private:
                 }
                 written += w;
                 writeStartMs = millis(); // Reset timeout since we successfully wrote some bytes
+                
+                // CRITICAL: Yield to the FreeRTOS scheduler to allow the Wi-Fi/lwIP task
+                // to process incoming TCP ACKs and actually transmit the encrypted TLS buffers.
+                // Without this, pushing 300KB in a tight loop starves the network stack and
+                // causes errno 9 (Bad file number) disconnects.
+                vTaskDelay(pdMS_TO_TICKS(15));
             }
             
             if (clientPtr->available() > 0) {

@@ -9,6 +9,7 @@
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
 #include "MP3DecoderHelix.h"
+#include <esp_system.h>
 
 
 #include "Display.h"
@@ -1006,6 +1007,11 @@ void setup() {
     Serial.println("\n============================================================");
     Serial.println("[SYSTEM] Melvin (ESP32-S3) Booting Up...");
     Serial.println("============================================================\n");
+    // Print crash reason from previous boot
+    esp_reset_reason_t reason = esp_reset_reason();
+    const char* reasons[] = {"UNKNOWN","POWERON","EXT","SW","PANIC","INT_WDT","TASK_WDT","WDT","DEEPSLEEP","BROWNOUT","SDIO"};
+    if (reason < 11) Serial.printf("[BOOT] Reset reason: %s (%d)\n", reasons[reason], reason);
+    else Serial.printf("[BOOT] Reset reason: %d\n", reason);
 
     pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
     pinMode(PA_CTRL_PIN,  OUTPUT);
@@ -1150,7 +1156,8 @@ void handleRecordingDone() {
         agent.recordExchange(transcribed, answer);
     }
     
-    setState(STATE_IDLE);
+    // We do NOT set STATE_IDLE here.
+    // The loop() will monitor tts.tts_playing and transition to IDLE when playback finishes.
 }
 
 // ============================================================
@@ -1223,6 +1230,15 @@ void loop() {
     }
 
     // --- Interaction Logic ---
+    if (currentState == STATE_SPEAKING && !tts.tts_playing) {
+        // Clear out the I2S RX buffer to prevent VAD from triggering on our own echo
+        size_t br = 0;
+        int16_t dummy[512];
+        while (i2s_channel_read(rx_handle, dummy, sizeof(dummy), &br, 0) == ESP_OK && br > 0) {}
+        
+        setState(STATE_IDLE);
+    }
+
     if (currentState == STATE_IDLE && !tts.tts_playing) {
         // Manual button trigger to start recording
         if (btnClicked) {
