@@ -769,18 +769,44 @@ public:
         } else {
             Serial.printf("[AGENT] Response received: %d bytes\n", responseBody.length());
             
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, responseBody);
-            if (error) {
-                Serial.println("[AGENT] JSON parse failed!");
-                Serial.println(responseBody);
-                result = "Error: Failed to parse n8n response";
-            } else {
-                const char* text_spoken = doc["text_spoken"];
-                if (text_spoken) {
-                    result = String(text_spoken);
+            // Check if response is JSON (starts with {)
+            if (responseBody.startsWith("{")) {
+                JsonDocument doc;
+                DeserializationError error = deserializeJson(doc, responseBody);
+                if (error) {
+                    Serial.println("[AGENT] JSON parse failed!");
+                    Serial.println(responseBody);
+                    result = "Error: Failed to parse n8n response JSON";
                 } else {
-                    result = "Error: No text_spoken in response";
+                    const char* text_spoken = doc["text_spoken"];
+                    if (text_spoken) {
+                        result = String(text_spoken);
+                    } else {
+                        result = "Error: No text_spoken in response";
+                    }
+                }
+            } else if (responseBody.startsWith("RIFF")) {
+                // n8n returned a raw WAV file (starts with RIFF)
+                // Save it to SD card as /response.wav so main.cpp can play it
+                File outWav = SD_MMC.open("/response.wav", FILE_WRITE);
+                if (outWav) {
+                    outWav.write((const uint8_t*)responseBody.c_str(), responseBody.length());
+                    outWav.close();
+                    Serial.printf("[AGENT] Saved raw WAV to /response.wav: %d bytes\n", responseBody.length());
+                    result = "[PLAY_WAV]";
+                } else {
+                    result = "Error: Failed to open /response.wav for writing";
+                }
+            } else {
+                // Default fallback: treat as MP3 and save to /response.mp3
+                File outMp3 = SD_MMC.open("/response.mp3", FILE_WRITE);
+                if (outMp3) {
+                    outMp3.write((const uint8_t*)responseBody.c_str(), responseBody.length());
+                    outMp3.close();
+                    Serial.printf("[AGENT] Saved raw MP3 to /response.mp3: %d bytes\n", responseBody.length());
+                    result = "[PLAY_MP3]";
+                } else {
+                    result = "Error: Failed to open /response.mp3 for writing";
                 }
             }
         }

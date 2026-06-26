@@ -1151,6 +1151,8 @@ void handleRecordingDone() {
         else tts.speakAsync("Не удалось получить ответ", configMgr.config);
     } else if (answer == "[PLAY_MP3]") {
         playMp3FromSD("/response.mp3");
+    } else if (answer == "[PLAY_WAV]") {
+        playWavFromSD("/response.wav");
     } else {
         tts.speakAsync(answer, configMgr.config);
         agent.recordExchange(transcribed, answer);
