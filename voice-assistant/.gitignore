@@ -1,0 +1,12 @@
+.env
+n8n_data/
+whisper_cache/
+__pycache__/
+*.log
+HttpRequestV3.node.js
+unflatten.py
+parse_execution.py
+parse_execution2.py
+check_http_node.py
+search_http_node.py
+read_db_error.py

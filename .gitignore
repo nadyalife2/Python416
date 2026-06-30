@@ -1,10 +1,19 @@
-# PlatformIO
+# PlatformIO & Build
 .pio/
 */.pio/
+.pio
 .pioenvs/
 .piolibdeps/
+build/
 *.bin
 *.elf
+*.stackdump
+*.bak
+*.old
+sdkconfig.old
+sdkconfig.temp
+/sdkconfig
+!sdkconfig.defaults
 
 # VS Code
 .vscode/
@@ -13,6 +22,15 @@
 __pycache__/
 *.pyc
 
+# Node
+node_modules/
+
 # OS
 .DS_Store
 Thumbs.db
+
+# Scratch directory ignores
+scratch/test_keys.py
+scratch/*.bin
+scratch/*.log
+scratch/*.txt

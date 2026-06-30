@@ -1,0 +1,23 @@
+{
+  "wifi_ssid": "ВАШ_WIFI_ИМЕНА",
+  "wifi_pass": "ВАШ_ПАРОЛЬ",
+
+  "ИНСТРУКЦИЯ_gemini_keys": "Ключ с aistudio.google.com → Get API key (БЕСПЛАТНО)",
+  "gemini_keys": "AIzaSyD6x2WG_DsvzCr6hPGxK2qmTeUUO-b3URE",
+
+  "ИНСТРУКЦИЯ_tts_key": "Ключ с console.cloud.google.com → APIs → Cloud Text-to-Speech API (нужен billing)",
+  "tts_key": "AIzaSyBE-ofKFDyW9IbJv3x5xRyUmKxqWCFnQGk",
+
+  "ИНСТРУКЦИЯ_api_proxy": "URL n8n вебхука для отправки аудио (base64 JSON). Если указан — ВЕСЬ AI-пайплайн идёт через n8n!",
+  "api_proxy": "http://192.168.X.X:5678/webhook/ВАШ-UUID",
+
+  "groq_keys": "",
+  "openrouter_keys": "",
+  "llm_provider": "gemini",
+  "tts_provider": "google",
+  "tts_voice": "ru-RU-Wavenet-B",
+  "personality": "rick",
+  "wake_word": "Мелвин",
+  "rss_url": "https://lenta.ru/rss/news",
+  "system_prompt": ""
+}

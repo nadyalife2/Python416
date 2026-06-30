@@ -1,0 +1,31 @@
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=Europe/Samara
+      - TZ=Europe/Samara
+      - N8N_SECURE_COOKIE=false
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD}
+      # API keys available to nodes via $env.GROQ_API_KEY / $env.GEMINI_API_KEY
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+      - ./files:/files   # Shared folder for Piper and audio files
+
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - WHISPER_MODEL=small
+    volumes:
+      - ./whisper_cache:/root/.cache/huggingface
