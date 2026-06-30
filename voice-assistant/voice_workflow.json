@@ -1,0 +1,328 @@
+{
+  "name": "Melvin Local Voice Assistant (Piper)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voice",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.body.audioBase64 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-validate",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [200, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const base64Data = $json.body.audioBase64;\nreturn [{\n  json: {\n    device_id: $json.body.device_id || 'melvin'\n  },\n  binary: {\n    data: {\n      data: base64Data,\n      mimeType: 'audio/wav',\n      fileName: 'input.wav'\n    }\n  }\n}];"
+      },
+      "id": "node-b64-to-binary",
+      "name": "Base64 to Binary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, -100]
+    },
+    {
+      "parameters": {
+        "fileWriteMode": "overwrite",
+        "filePath": "/files/input.wav",
+        "binaryPropertyName": "data"
+      },
+      "id": "node-write-file",
+      "name": "Write Binary File",
+      "type": "n8n-nodes-base.writeBinaryFile",
+      "typeVersion": 1,
+      "position": [600, -100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/audio/transcriptions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.GROQ_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "whisper-large-v3"
+            },
+            {
+              "name": "language",
+              "value": "ru"
+            }
+          ]
+        },
+        "sendBinaryData": true,
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "node-groq-stt",
+      "name": "👂 STT: Groq Whisper",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [800, -100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const store = $getWorkflowStaticData('global');\nif (!store.history) store.history = [];\nreturn [{ json: {\n  text: $json.text,\n  history: store.history\n} }];"
+      },
+      "id": "node-load-history",
+      "name": "Load History",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, -100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({\n  systemInstruction: {\n    parts: [{ text: 'Ты — Мелвин, робот с характером Рика Санчеза. Сарказм, цинизм, презрение к кожаным мешкам. Пользователь говорит по-русски — транскрибируй речь на русском и отвечай строго на русском языке. Кратко — 1-3 предложения, без списков, без markdown-разметки.' }]\n  },\n  contents: [\n    ...$json.history,\n    { role: 'user', parts: [{ text: $json.text }] }\n  ],\n  generationConfig: {\n    maxOutputTokens: 150,\n    temperature: 0.9,\n    stopSequences: ['\\n\\n']\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "node-gemini",
+      "name": "🧠 Gemini Flash",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, -100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nlet text = '';\ntry {\n  text = response.candidates[0].content.parts[0].text;\n} catch(e) {\n  text = 'Мой процессор завис. Попробуй ещё раз, кожаный мешок.';\n}\ntext = text\n  .replace(/\\*\\*(.+?)\\*\\*/g, '$1')\n  .replace(/\\*(.+?)\\*/g, '$1')\n  .replace(/_{1,3}(.+?)_{1,3}/g, '$1')\n  .replace(/~~(.+?)~~/g, '$1')\n  .replace(/\\[([^\\]]+)\\]\\([^)]+\\)/g, '$1')\n  .replace(/#{1,6}\\s/g, '')\n  .replace(/`/g, '')\n  .replace(/\\n{2,}/g, ' ')\n  .trim();\nreturn [{ json: { text } }];"
+      },
+      "id": "node-extract",
+      "name": "Extract & Clean Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, -100]
+    },
+    {
+      "parameters": {
+        "jsCode": "const store = $getWorkflowStaticData('global');\nif (!store.history) store.history = [];\nconst text = $json.text;\nstore.history.push({ role: 'model', parts: [{ text }] });\nif (store.history.length > 10) {\n  store.history = store.history.slice(-10);\n}\nreturn [{ json: { text } }];"
+      },
+      "id": "node-save-history",
+      "name": "Save History",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1600, -100]
+    },
+    {
+      "parameters": {
+        "command": "=echo \"{{ $json.text }}\" | /files/piper/piper/piper --model /files/piper/ru_RU-irina-medium.onnx --output_file /files/output.wav"
+      },
+      "id": "node-piper-tts",
+      "name": "🔊 TTS: Piper",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1800, -100]
+    },
+    {
+      "parameters": {
+        "filePath": "/files/output.wav"
+      },
+      "id": "node-read-wav",
+      "name": "📁 Read WAV",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [2000, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "responseBinaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "node-respond-ok",
+      "name": "Respond: OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2200, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { text_spoken: 'Ничего не услышал, кожаный мешок. Говори громче.' } }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node-respond-empty",
+      "name": "Respond: Empty Audio",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [400, 100]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Base64 to Binary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond: Empty Audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Base64 to Binary": {
+      "main": [
+        [
+          {
+            "node": "Write Binary File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Binary File": {
+      "main": [
+        [
+          {
+            "node": "👂 STT: Groq Whisper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "👂 STT: Groq Whisper": {
+      "main": [
+        [
+          {
+            "node": "Load History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load History": {
+      "main": [
+        [
+          {
+            "node": "🧠 Gemini Flash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🧠 Gemini Flash": {
+      "main": [
+        [
+          {
+            "node": "Extract & Clean Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract & Clean Text": {
+      "main": [
+        [
+          {
+            "node": "Save History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save History": {
+      "main": [
+        [
+          {
+            "node": "🔊 TTS: Piper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔊 TTS: Piper": {
+      "main": [
+        [
+          {
+            "node": "📁 Read WAV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📁 Read WAV": {
+      "main": [
+        [
+          {
+            "node": "Respond: OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
