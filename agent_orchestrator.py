@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Melvin Autonomous On-Device Agent Orchestrator (Dual Persona & Hands-Free Edition)
+Melvin Autonomous On-Device Agent Orchestrator (Hands-Free Wake-Word Edition)
 Running on Xiaomi Redmi Note 4 (Helio X20 MT6797)
+- 100% Hands-Free Continuous Voice Activation:
+    * No buttons needed! User simply says "Мелвин" or "Рик" anywhere in the room.
+    * Audio stream via Web Audio API + continuous VAD + Google STT on device.
 - Dual Persona Engine: "🤖 МЕЛВИН" (Cynical Robot) / "🧪 РИК" (Rick Sanchez)
 - Rick ALWAYS plays burp audio effect (/burp.mp3) on every response
-- Ultra-Low Pitch Masculine Voice Profile (pitch = 0.40, > 1 octave lower deep bass)
-- Voice Activation on "Мелвин" & "Рик" -> automatically triggers Google Voice Recording
-- Hands-Free Auto-Dialog Mode
+- Ultra-Low Pitch Voice: pitch = 0.40 (> 1 octave down, deep cybernetic bass)
 - Instant Hardware Tools (<0.02s !torch, !bat, !sys) with expanded conversational intents
 - Thermal Throttle Guard (50°C safety governor)
 - SQLite FTS5 with Trigram Tokenizer (tokenize='trigram' for Russian morphology)
@@ -17,9 +18,11 @@ import json
 import time
 import re
 import os
+import io
 import random
 import threading
 import requests
+import speech_recognition as sr
 from flask import Flask, request, jsonify, render_template_string, send_file
 import phone_tools
 
@@ -38,6 +41,7 @@ LLAMA_URL = "http://127.0.0.1:8080/completion"
 app = Flask("MelvinAgent")
 
 CURRENT_PERSONA = "melvin"
+speech_rec = sr.Recognizer()
 
 # Optional Perplexity API key
 PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY", "")
@@ -302,7 +306,7 @@ def query_perplexity_or_web(query, persona="melvin"):
     return None
 
 # ==========================================
-# 4. WEB UI TEMPLATE
+# 4. WEB UI TEMPLATE (Hands-Free Listening)
 # ==========================================
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ru">
@@ -348,11 +352,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border-color: var(--rick-cyan);
         }
 
-        .action-badge {
+        .vad-badge {
             font-size: 11px;
-            background: #21262d;
-            color: var(--text-dim);
-            border: 1px solid #30363d;
+            background: var(--accent-dim);
+            color: var(--accent);
+            border: 1px solid var(--accent);
             padding: 5px 9px;
             border-radius: 12px;
             cursor: pointer;
@@ -363,12 +367,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             width: auto;
             height: auto;
         }
-        .action-badge.active {
-            background: var(--accent-dim);
-            color: var(--accent);
-            border-color: var(--accent);
+        .vad-badge.recording {
+            background: rgba(248, 81, 73, 0.2);
+            color: #f85149;
+            border-color: #f85149;
         }
         .pulse-dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; animation: pulse 1.5s infinite; }
+        .vad-badge.recording .pulse-dot { background: #f85149; box-shadow: 0 0 8px #f85149; }
         @keyframes pulse { 0% { opacity: 0.3; transform: scale(0.9); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0.3; transform: scale(0.9); } }
 
         #chat-box { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
@@ -396,8 +401,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="header-actions">
             <button id="persona-btn" class="persona-btn" onclick="togglePersona()">🤖 МЕЛВИН</button>
-            <button id="autovoice-btn" class="action-badge active" onclick="toggleAutoVoice()">🔄 АВТО-ДИАЛОГ</button>
-            <button id="wake-btn" class="action-badge" onclick="triggerGoogleVoiceRecording()">🎙️ ГУГЛ</button>
+            <div id="vad-indicator" class="vad-badge" onclick="triggerManualGoogleVoice()">
+                <span class="pulse-dot"></span> <span id="vad-text">СЛУШАЮ: "МЕЛВИН / РИК"</span>
+            </div>
         </div>
     </header>
     <div id="chat-box">
@@ -406,13 +412,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <span id="welcome-sender">МЕЛВИН (ИИ)</span>
                 <span class="meta-tag">ONLINE</span>
             </div>
-            <span id="welcome-text">Системы в норме. Чего тебе надо, кожаный ублюдок? Выкладывай суть или не трать мои процессорные такты.</span>
+            <span id="welcome-text">Микрофон активен. Скажи вслух «Мелвин» или «Рик» без нажатия кнопок.</span>
         </div>
     </div>
     <div class="loading" id="loader">⚡ Обработка на Helio X20...</div>
     <div class="input-bar">
-        <button class="mic-btn" id="mic-btn" onclick="triggerGoogleVoiceRecording()">🎤</button>
-        <input type="text" id="prompt-input" placeholder="Команда для Мелвина..." onkeydown="if(event.key==='Enter') send()">
+        <button class="mic-btn" id="mic-btn" onclick="triggerManualGoogleVoice()">🎤</button>
+        <input type="text" id="prompt-input" placeholder="Скажи 'Мелвин' или 'Рик'..." onkeydown="if(event.key==='Enter') send()">
         <button onclick="send()">➤</button>
     </div>
 
@@ -423,20 +429,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const micBtn = document.getElementById('mic-btn');
         const personaBtn = document.getElementById('persona-btn');
         const headerTitle = document.getElementById('header-title');
-        const autovoiceBtn = document.getElementById('autovoice-btn');
+        const vadIndicator = document.getElementById('vad-indicator');
+        const vadText = document.getElementById('vad-text');
 
         // Audio Belch effect
         const burpAudio = new Audio('/burp.mp3');
         burpAudio.preload = 'auto';
 
         let currentPersona = localStorage.getItem('melvin_persona') || 'melvin';
-        let isAutoVoiceActive = localStorage.getItem('melvin_autovoice') !== 'false'; // default true
 
         // Ultra-low pitch (More than an octave down: 0.40 bass)
         const TARGET_PITCH = 0.40;
         const TARGET_RATE = 0.95;
 
-        // Apply ultra-low pitch to native bridge immediately
+        let isBotSpeaking = false;
+        let isWaitingForCommand = false;
+
         function applyNativeVoiceSettings() {
             if (window.MelvinNativeBridge) {
                 if (typeof window.MelvinNativeBridge.setPitch === 'function') {
@@ -455,14 +463,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 personaBtn.innerHTML = '🧪 РИК';
                 personaBtn.classList.add('rick-mode');
                 headerTitle.textContent = 'РИК САНЧЕЗ // HELIO X20';
-                input.placeholder = 'Спроси Рика...';
+                input.placeholder = "Скажи 'Рик' или команду...";
                 document.documentElement.style.setProperty('--accent', '#00e5ff');
                 document.documentElement.style.setProperty('--accent-dim', 'rgba(0, 229, 255, 0.15)');
             } else {
                 personaBtn.innerHTML = '🤖 МЕЛВИН';
                 personaBtn.classList.remove('rick-mode');
                 headerTitle.textContent = 'МЕЛВИН // HELIO X20';
-                input.placeholder = 'Команда для Мелвина...';
+                input.placeholder = "Скажи 'Мелвин' или команду...";
                 document.documentElement.style.setProperty('--accent', '#00ff9d');
                 document.documentElement.style.setProperty('--accent-dim', 'rgba(0, 255, 157, 0.15)');
             }
@@ -484,18 +492,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }).catch(e => console.log('Persona sync notice:', e));
         }
 
-        function toggleAutoVoice() {
-            isAutoVoiceActive = !isAutoVoiceActive;
-            localStorage.setItem('melvin_autovoice', isAutoVoiceActive ? 'true' : 'false');
-            if (isAutoVoiceActive) {
-                autovoiceBtn.classList.add('active');
-                autovoiceBtn.innerHTML = '🔄 АВТО-ДИАЛОГ';
-            } else {
-                autovoiceBtn.classList.remove('active');
-                autovoiceBtn.innerHTML = '⏸️ АВТО ВЫКЛ';
-            }
-        }
-
         function appendMsg(role, text, timeSec, toolUsed) {
             const div = document.createElement('div');
             div.className = 'msg ' + (role === 'user' ? 'user' : 'bot');
@@ -512,8 +508,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             chatBox.scrollTop = chatBox.scrollHeight;
         }
 
-        async function send() {
-            const text = input.value.trim();
+        async function send(explicitText) {
+            const text = (explicitText || input.value).trim();
             if (!text) return;
             input.value = '';
             appendMsg('user', text);
@@ -544,11 +540,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 if (data.response) {
                     appendMsg('bot', data.response, data.inference_time_sec, data.tool_used);
-                    
-                    // Should we trigger voice recording after speech finishes?
-                    // YES if it was a wake word hail OR if Auto-Dialog is active!
-                    const shouldRecordAfter = data.trigger_voice_record || isAutoVoiceActive;
-                    speakWithLowPitch(data.response, shouldRecordAfter);
+                    // If wake-word was hailed, bot is now waiting for user's command
+                    if (data.tool_used === 'wake_word') {
+                        isWaitingForCommand = true;
+                    } else {
+                        isWaitingForCommand = false;
+                    }
+                    speakWithLowPitch(data.response);
                 } else {
                     appendMsg('bot', 'Ошибка: ' + (data.error || 'Процессор перегружен'));
                 }
@@ -559,55 +557,45 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
-        // --- Low-Pitch Voice + Belch Sound Trigger ---
         function playBurpSound() {
             try {
                 burpAudio.currentTime = 0;
                 const p = burpAudio.play();
-                if (p !== undefined) {
-                    p.catch(e => console.log('Burp audio catch:', e));
-                }
+                if (p !== undefined) p.catch(e => console.log('Burp error:', e));
             } catch(e) {
-                console.log('Burp error:', e);
+                console.log('Burp audio catch:', e);
             }
         }
 
-        function speakWithLowPitch(text, shouldStartVoiceAfter) {
+        function speakWithLowPitch(text) {
             let raw = text.trim();
-            if (!raw) {
-                if (shouldStartVoiceAfter) setTimeout(triggerGoogleVoiceRecording, 500);
-                return;
-            }
+            if (!raw) return;
 
+            isBotSpeaking = true;
             const isRick = (currentPersona === 'rick');
-            // Rick ALWAYS belches on EVERY response!
             const hasBurp = isRick || /\*рыгает\*|\*отрыжка\*/i.test(raw);
             const cleanText = raw.replace(/\*рыгает\*|\*отрыжка\*/gi, '').trim();
 
             if (hasBurp) {
                 playBurpSound();
                 setTimeout(() => {
-                    executeVoiceOutput(cleanText, shouldStartVoiceAfter);
+                    executeVoiceOutput(cleanText);
                 }, 550);
             } else {
-                executeVoiceOutput(cleanText, shouldStartVoiceAfter);
+                executeVoiceOutput(cleanText);
             }
         }
 
-        function executeVoiceOutput(spoken, shouldStartVoiceAfter) {
+        function executeVoiceOutput(spoken) {
             applyNativeVoiceSettings();
-
-            // Calculate estimated speech duration in ms
             const speechDurationMs = Math.max(1600, spoken.length * 85);
 
             // 1. Android Native TTS
             if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.speak === 'function') {
                 window.MelvinNativeBridge.speak(spoken);
-                if (shouldStartVoiceAfter) {
-                    setTimeout(() => {
-                        triggerGoogleVoiceRecording();
-                    }, speechDurationMs + 400);
-                }
+                setTimeout(() => {
+                    isBotSpeaking = false;
+                }, speechDurationMs + 300);
                 return;
             }
 
@@ -626,59 +614,189 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 ));
                 if (ruMale) utter.voice = ruMale;
 
-                if (shouldStartVoiceAfter) {
-                    utter.onend = () => {
-                        setTimeout(triggerGoogleVoiceRecording, 400);
-                    };
-                }
+                utter.onend = () => { isBotSpeaking = false; };
+                utter.onerror = () => { isBotSpeaking = false; };
                 window.speechSynthesis.speak(utter);
             } else {
-                if (shouldStartVoiceAfter) {
-                    setTimeout(triggerGoogleVoiceRecording, 800);
+                setTimeout(() => { isBotSpeaking = false; }, speechDurationMs);
+            }
+        }
+
+        // ========================================================
+        // 100% HANDS-FREE CONTINUOUS MICROPHONE LISTENER (ZERO BUTTONS!)
+        // ========================================================
+        function encodeWAV(samples, sampleRate) {
+            const buffer = new ArrayBuffer(44 + samples.length * 2);
+            const view = new DataView(buffer);
+
+            function writeString(offset, string) {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
                 }
             }
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + samples.length * 2, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true); // PCM
+            view.setUint16(22, 1, true); // Mono
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(36, 'data');
+            view.setUint32(40, samples.length * 2, true);
+
+            let offset = 44;
+            for (let i = 0; i < samples.length; i++, offset += 2) {
+                const s = Math.max(-1, Math.min(1, samples[i]));
+                view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+            }
+            return new Blob([buffer], { type: 'audio/wav' });
         }
 
-        // Direct Trigger for Google Voice Recording Dialog
-        function triggerGoogleVoiceRecording() {
-            if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.startVoice === 'function') {
-                window.MelvinNativeBridge.startVoice();
-                return;
-            }
-            toggleVoice();
-        }
+        let audioStream = null;
+        let audioContext = null;
+        let isCapturingSpeech = false;
+        let speechBuffer = [];
+        let silenceCount = 0;
+        let vadThreshold = 0.022; // RMS voice sensitivity threshold
 
-        // Bridge Callback from Android Google Speech Recognizer
-        window.onNativeVoiceInput = function(text) {
-            input.value = text;
-            send();
-        };
+        async function initHandsFreeWakeWord() {
+            try {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    vadText.textContent = 'МИКРОФОН НЕДОСТУПЕН';
+                    return;
+                }
 
-        let recognition;
-        function toggleVoice() {
-            if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.startVoice === 'function') {
-                window.MelvinNativeBridge.startVoice();
-                return;
-            }
-            if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-                alert('Голосовой ввод доступен через нативное приложение Melvin.');
-                return;
-            }
-            if (!recognition) {
-                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-                recognition = new SpeechRecognition();
-                recognition.lang = 'ru-RU';
-                recognition.continuous = false;
-                recognition.interimResults = false;
-                recognition.onstart = () => micBtn.classList.add('active');
-                recognition.onend = () => micBtn.classList.remove('active');
-                recognition.onresult = (e) => {
-                    input.value = e.results[0][0].transcript;
-                    send();
+                audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(audioStream);
+                // ScriptProcessorNode for real-time RMS & chunk collection
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                processor.onaudioprocess = (e) => {
+                    if (isBotSpeaking) {
+                        // Avoid listening to Melvin/Rick's own voice!
+                        speechBuffer = [];
+                        isCapturingSpeech = false;
+                        return;
+                    }
+
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    let sum = 0;
+                    for (let i = 0; i < inputData.length; i++) {
+                        sum += inputData[i] * inputData[i];
+                    }
+                    const rms = Math.sqrt(sum / inputData.length);
+
+                    // Voice Activity Detection (VAD)
+                    if (rms > vadThreshold) {
+                        silenceCount = 0;
+                        if (!isCapturingSpeech) {
+                            isCapturingSpeech = true;
+                            speechBuffer = [];
+                            vadIndicator.classList.add('recording');
+                            vadText.textContent = 'ЗАПИСЬ РЕЧИ...';
+                        }
+                    } else if (isCapturingSpeech) {
+                        silenceCount++;
+                    }
+
+                    if (isCapturingSpeech) {
+                        speechBuffer.push(new Float32Array(inputData));
+
+                        // If user paused speaking for ~500ms (approx 2 chunks of 4096 samples at 16kHz)
+                        // OR if maximum phrase length reached (~3 seconds)
+                        if (silenceCount >= 2 || speechBuffer.length >= 12) {
+                            isCapturingSpeech = false;
+                            vadIndicator.classList.remove('recording');
+                            vadText.textContent = 'РАСПОЗНАВАНИЕ...';
+
+                            // Flatten samples
+                            let totalLen = 0;
+                            for (let b of speechBuffer) totalLen += b.length;
+                            const flat = new Float32Array(totalLen);
+                            let off = 0;
+                            for (let b of speechBuffer) {
+                                flat.set(b, off);
+                                off += b.length;
+                            }
+                            speechBuffer = [];
+
+                            // Send WAV to on-device Google STT endpoint
+                            processSpeechChunk(flat);
+                        }
+                    }
                 };
+
+                vadText.textContent = 'СЛУШАЮ: "МЕЛВИН / РИК"';
+                console.log('[Hands-Free] Mic listener running continuously!');
+            } catch(e) {
+                console.log('[Hands-Free] Mic init error:', e);
+                vadText.textContent = 'ОШИБКА МИКРОФОНА';
             }
-            recognition.start();
         }
+
+        async function processSpeechChunk(samples) {
+            try {
+                const wavBlob = encodeWAV(samples, 16000);
+                const res = await fetch('/transcribe_audio', {
+                    method: 'POST',
+                    body: wavBlob
+                });
+                const data = await res.json();
+                vadText.textContent = 'СЛУШАЮ: "МЕЛВИН / РИК"';
+
+                if (data.status === 'ok' && data.text) {
+                    const text = data.text.trim();
+                    const lower = text.toLowerCase();
+                    console.log('[Hands-Free] Detected voice:', text);
+
+                    const isWakeHail = lower.includes('мелвин') || lower.includes('мэлвин') || lower.includes('melvin') ||
+                                      lower.includes('рик') || lower.includes('rick');
+
+                    // If wake phrase was spoken OR if we are in command follow-up mode:
+                    if (isWakeHail || isWaitingForCommand) {
+                        if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.vibrate === 'function') {
+                            window.MelvinNativeBridge.vibrate(50);
+                        }
+                        send(text);
+                    }
+                }
+            } catch(e) {
+                console.log('[Hands-Free] STT post error:', e);
+                vadText.textContent = 'СЛУШАЮ: "МЕЛВИН / РИК"';
+            }
+        }
+
+        // Start hands-free listener on load
+        window.addEventListener('load', () => {
+            initHandsFreeWakeWord();
+        });
+
+        // Fallback manual trigger for Google dialog if user taps mic button
+        function triggerManualGoogleVoice() {
+            if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.startVoice === 'function') {
+                window.MelvinNativeBridge.startVoice();
+            }
+        }
+
+        window.onNativeVoiceInput = function(text) {
+            send(text);
+        };
     </script>
 </body>
 </html>
@@ -849,6 +967,26 @@ def set_persona():
         CURRENT_PERSONA = p
     return jsonify({"status": "ok", "persona": CURRENT_PERSONA})
 
+@app.route("/transcribe_audio", methods=["POST"])
+def transcribe_audio():
+    try:
+        audio_data = request.get_data()
+        if not audio_data or len(audio_data) < 1000:
+            return jsonify({"status": "empty", "text": ""})
+        
+        buf = io.BytesIO(audio_data)
+        with sr.AudioFile(buf) as source:
+            audio = speech_rec.record(source)
+            
+        text = speech_rec.recognize_google(audio, language="ru-RU")
+        print(f"[Hands-Free STT] Recognized: '{text}'")
+        return jsonify({"status": "ok", "text": text})
+    except sr.UnknownValueError:
+        return jsonify({"status": "no_speech", "text": ""})
+    except Exception as e:
+        print(f"[Hands-Free STT error]: {e}")
+        return jsonify({"status": "error", "error": str(e), "text": ""})
+
 @app.route("/chat", methods=["POST"])
 def chat():
     global CURRENT_PERSONA
@@ -871,7 +1009,6 @@ def chat():
         return jsonify({
             "response": resp_text,
             "persona": "rick",
-            "trigger_voice_record": True,
             "tool_used": "mode_switch",
             "inference_time_sec": 0.01,
             "status": "ok"
@@ -883,25 +1020,21 @@ def chat():
         return jsonify({
             "response": resp_text,
             "persona": "melvin",
-            "trigger_voice_record": True,
             "tool_used": "mode_switch",
             "inference_time_sec": 0.01,
             "status": "ok"
         })
 
     # 1. Активация по фразе "Мелвин" / "Рик"
-    # Регулярка ловит "Мелвин", "Рик", "Слушай, Мелвин", "Эй, Рик" и т.д.
     m_match = re.match(r'^(?:эй|слушай|привет|ок)?\s*(мелвин|мэлвин|melvin|рик|rick)[,\s]*(.*)$', raw_user_msg, re.IGNORECASE)
     user_msg = raw_user_msg
     if m_match:
         called_name = m_match.group(1).lower()
         rest_msg = m_match.group(2).strip()
 
-        # Если обратились к Рику — переключаемся на Рика
         if called_name in ["рик", "rick"]:
             persona = "rick"
             CURRENT_PERSONA = "rick"
-        # Если обратились к Мелвину — переключаемся на Мелвина
         elif called_name in ["мелвин", "мэлвин", "melvin"]:
             persona = "melvin"
             CURRENT_PERSONA = "melvin"
@@ -924,7 +1057,6 @@ def chat():
             return jsonify({
                 "response": wake_reply,
                 "persona": persona,
-                "trigger_voice_record": True, # СРАЗУ ЗАПУСТИТЬ ЗАПИСЬ ГОЛОСА ЧЕРЕЗ ГУГЛ!
                 "tool_used": "wake_word",
                 "inference_time_sec": 0.01,
                 "status": "ok"
@@ -937,7 +1069,6 @@ def chat():
     # 2. Аппаратные быстрые инструменты (!torch, !bat, !sys, !weather)
     tool_used, telemetry, canned_ans = check_fast_tools(user_msg, persona=persona)
     if canned_ans:
-        # Рик всегда начинает с отрыжки
         if persona == "rick" and not canned_ans.startswith("*рыгает*"):
             canned_ans = "*рыгает* " + canned_ans
         dt = round(time.time() - t0, 2)
@@ -1106,5 +1237,5 @@ def warmup_kv_cache():
 if __name__ == "__main__":
     init_db()
     warmup_kv_cache()
-    print("Melvin & Rick Dual AI running on port 5000...")
+    print("Melvin & Rick Hands-Free AI running on port 5000...")
     app.run(host="0.0.0.0", port=5000)
