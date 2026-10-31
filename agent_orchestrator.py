@@ -372,6 +372,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #f85149;
             border-color: #f85149;
         }
+        .vad-badge.dialogue-active {
+            background: rgba(0, 229, 255, 0.22);
+            color: #00e5ff;
+            border-color: #00e5ff;
+            box-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+        }
+        .vad-badge.dialogue-active .pulse-dot {
+            background: #00e5ff;
+            box-shadow: 0 0 8px #00e5ff;
+        }
         .pulse-dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; animation: pulse 1.5s infinite; }
         .vad-badge.recording .pulse-dot { background: #f85149; box-shadow: 0 0 8px #f85149; }
         @keyframes pulse { 0% { opacity: 0.3; transform: scale(0.9); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0.3; transform: scale(0.9); } }
@@ -444,6 +454,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         let isBotSpeaking = false;
         let isWaitingForCommand = false;
+        let dialogueActiveUntil = 0; // Timestamp when continuous multi-turn dialogue expires
+
+        function onBotSpeechFinished() {
+            isBotSpeaking = false;
+            // Activate continuous dialogue window for 20 seconds
+            dialogueActiveUntil = Date.now() + 20000;
+
+            // Short vibration pulse to signal mic is wide open
+            if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.vibrate === 'function') {
+                window.MelvinNativeBridge.vibrate(35);
+            }
+
+            vadIndicator.classList.add('dialogue-active');
+            vadText.textContent = 'ДИАЛОГ: ГОВОРИТЕ...';
+            console.log('[Dialogue] Bot speech done. Mic is OPEN for command!');
+        }
 
         function applyNativeVoiceSettings() {
             if (window.MelvinNativeBridge) {
@@ -588,14 +614,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         function executeVoiceOutput(spoken) {
             applyNativeVoiceSettings();
-            const speechDurationMs = Math.max(1600, spoken.length * 85);
+            // Accurate speech duration based on word count (~280ms per word + 350ms margin)
+            const words = spoken.trim().split(/\s+/).filter(Boolean);
+            const speechDurationMs = Math.max(900, words.length * 280 + 350);
 
             // 1. Android Native TTS
             if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.speak === 'function') {
                 window.MelvinNativeBridge.speak(spoken);
-                setTimeout(() => {
-                    isBotSpeaking = false;
-                }, speechDurationMs + 300);
+                setTimeout(onBotSpeechFinished, speechDurationMs);
                 return;
             }
 
@@ -614,11 +640,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 ));
                 if (ruMale) utter.voice = ruMale;
 
-                utter.onend = () => { isBotSpeaking = false; };
-                utter.onerror = () => { isBotSpeaking = false; };
+                utter.onend = onBotSpeechFinished;
+                utter.onerror = onBotSpeechFinished;
                 window.speechSynthesis.speak(utter);
             } else {
-                setTimeout(() => { isBotSpeaking = false; }, speechDurationMs);
+                setTimeout(onBotSpeechFinished, speechDurationMs);
             }
         }
 
@@ -689,7 +715,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 processor.onaudioprocess = (e) => {
                     if (isBotSpeaking) {
-                        // Avoid listening to Melvin/Rick's own voice!
                         speechBuffer = [];
                         isCapturingSpeech = false;
                         return;
@@ -702,14 +727,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     }
                     const rms = Math.sqrt(sum / inputData.length);
 
-                    // Voice Activity Detection (VAD)
-                    if (rms > vadThreshold) {
+                    const isDialogueActive = Date.now() < dialogueActiveUntil;
+                    // In active dialogue, increase sensitivity so user can speak naturally
+                    const currentThreshold = isDialogueActive ? 0.016 : 0.022;
+
+                    if (rms > currentThreshold) {
                         silenceCount = 0;
                         if (!isCapturingSpeech) {
                             isCapturingSpeech = true;
                             speechBuffer = [];
                             vadIndicator.classList.add('recording');
-                            vadText.textContent = 'ЗАПИСЬ РЕЧИ...';
+                            vadText.textContent = isDialogueActive ? 'СЛУШАЮ КОМАНДУ...' : 'ЗАПИСЬ РЕЧИ...';
                         }
                     } else if (isCapturingSpeech) {
                         silenceCount++;
@@ -718,14 +746,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     if (isCapturingSpeech) {
                         speechBuffer.push(new Float32Array(inputData));
 
-                        // If user paused speaking for ~500ms (approx 2 chunks of 4096 samples at 16kHz)
-                        // OR if maximum phrase length reached (~3 seconds)
-                        if (silenceCount >= 2 || speechBuffer.length >= 12) {
+                        // Finish phrase when 3 silence chunks detected (~768ms) OR max 20 chunks (~5.1s)
+                        if (silenceCount >= 3 || speechBuffer.length >= 20) {
                             isCapturingSpeech = false;
                             vadIndicator.classList.remove('recording');
                             vadText.textContent = 'РАСПОЗНАВАНИЕ...';
 
-                            // Flatten samples
                             let totalLen = 0;
                             for (let b of speechBuffer) totalLen += b.length;
                             const flat = new Float32Array(totalLen);
@@ -736,8 +762,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             }
                             speechBuffer = [];
 
-                            // Send WAV to on-device Google STT endpoint
-                            processSpeechChunk(flat);
+                            processSpeechChunk(flat, isDialogueActive);
+                        }
+                    } else {
+                        // When idle: show dialogue mode or standby
+                        if (isDialogueActive) {
+                            vadIndicator.classList.add('dialogue-active');
+                            vadText.textContent = 'ДИАЛОГ: ГОВОРИТЕ...';
+                        } else {
+                            vadIndicator.classList.remove('dialogue-active');
+                            vadText.textContent = 'СЛУШАЮ: "МЕЛВИН / РИК"';
                         }
                     }
                 };
@@ -750,7 +784,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
-        async function processSpeechChunk(samples) {
+        async function processSpeechChunk(samples, wasDialogueActive) {
             try {
                 const wavBlob = encodeWAV(samples, 16000);
                 const res = await fetch('/transcribe_audio', {
@@ -758,27 +792,39 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     body: wavBlob
                 });
                 const data = await res.json();
-                vadText.textContent = 'СЛУШАЮ: "МЕЛВИН / РИК"';
 
                 if (data.status === 'ok' && data.text) {
                     const text = data.text.trim();
                     const lower = text.toLowerCase();
-                    console.log('[Hands-Free] Detected voice:', text);
+                    console.log('[Hands-Free] Recognized:', text, '| InDialogue:', wasDialogueActive);
 
                     const isWakeHail = lower.includes('мелвин') || lower.includes('мэлвин') || lower.includes('melvin') ||
                                       lower.includes('рик') || lower.includes('rick');
 
-                    // If wake phrase was spoken OR if we are in command follow-up mode:
-                    if (isWakeHail || isWaitingForCommand) {
+                    // If wake word was detected OR if dialogue was already active:
+                    if (isWakeHail || wasDialogueActive || isWaitingForCommand) {
+                        // Check if user wants to exit dialogue
+                        if (lower.includes('стоп') || lower.includes('хватит') || lower.includes('отмена') || lower.includes('заткнись')) {
+                            dialogueActiveUntil = 0;
+                            isWaitingForCommand = false;
+                            appendMsg('user', text);
+                            appendMsg('bot', 'Диалог окончен. Слушаю оклик.');
+                            vadIndicator.classList.remove('dialogue-active');
+                            vadText.textContent = 'СЛУШАЮ: "МЕЛВИН / РИК"';
+                            return;
+                        }
+
+                        // Extend active dialogue by 20 seconds!
+                        dialogueActiveUntil = Date.now() + 20000;
+
                         if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.vibrate === 'function') {
-                            window.MelvinNativeBridge.vibrate(50);
+                            window.MelvinNativeBridge.vibrate(40);
                         }
                         send(text);
                     }
                 }
             } catch(e) {
-                console.log('[Hands-Free] STT post error:', e);
-                vadText.textContent = 'СЛУШАЮ: "МЕЛВИН / РИК"';
+                console.log('[Hands-Free] STT error:', e);
             }
         }
 
