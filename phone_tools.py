@@ -76,8 +76,10 @@ def get_hardware_status():
             with open("/proc/loadavg", "r") as f:
                 load = f.read().split()[:3]
 
+        avail = mem_info.get("MemAvailable", mem_info.get("MemFree", "N/A"))
         return {
-            "ram_available": mem_info.get("MemAvailable", "N/A"),
+            "ram_available": avail,
+            "mem_available": avail,
             "cpu_temp": cpu_temp,
             "load_avg": load
         }
@@ -111,6 +113,10 @@ def toggle_torch(state):
         subprocess.call(cmd, shell=True)
 
     return {"torch": "ON" if state_str == "1" else "OFF"}
+
+def set_torch(state):
+    """Alias for toggle_torch for compatibility."""
+    return toggle_torch(state)
 
 def search_memory(query, limit=2):
     """Queries SQLite FTS5 database."""

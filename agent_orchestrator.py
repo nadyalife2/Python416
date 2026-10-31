@@ -41,12 +41,12 @@ FEW_SHOT = [
 ]
 
 RICK_PREFILLS = [
-    "*рыгает* ",
-    "Слушай сюда, ",
-    "*рыгает* О боже, ",
-    "Чего пялишься? ",
-    "Серьезно? ",
-    "Слушай, кусок углерода, "
+    "*рыгает* Слушай, ",
+    "*рыгает* Чего тебе, ",
+    "Слушай сюда, кусок углерода, ",
+    "*рыгает* Опять ты, ",
+    "Чего пялишься? Я ",
+    "*рыгает* Короче, "
 ]
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -251,49 +251,74 @@ def save_memory(role, content):
         print(f"Memory save error: {e}")
 
 def search_relevant_memories(user_msg, max_results=1):
-    words = re.findall(r'\b[a-zA-Zа-яА-Я0-9]{4,}\b', user_msg)
+    stop_words = {"какая", "какой", "сколько", "привет", "рикролл", "пожалуйста", "скажи", "покажи", "что", "как", "где"}
+    words = [w for w in re.findall(r'\b[a-zA-Zа-яА-Я0-9]{4,}\b', user_msg) if w.lower() not in stop_words]
     if not words:
         return []
-    fts_query = " OR ".join(words[:2])
+    clean_words = [re.sub(r'[^\w]', '', w) for w in words[:3] if w]
+    if not clean_words:
+        return []
+    fts_query = " OR ".join(clean_words)
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("""
-            SELECT role, content FROM dialog_fts 
+            SELECT content FROM dialog_fts 
             WHERE dialog_fts MATCH ? 
             ORDER BY rank 
             LIMIT ?
         """, (fts_query, max_results))
-        results = cur.fetchall()
+        results = [row[0] for row in cur.fetchall()]
         conn.close()
         return results
     except Exception as e:
         return []
 
+TOOL_CANNED_REPLIES = {
+    "!torch(1)": "*рыгает* Врубил фотонный излучатель. Только сетчатку себе не выжги, гений.",
+    "!torch(0)": "*рыгает* Погасил. Можешь дальше тыкаться в темноте, как обычно.",
+    "!bat()": "*рыгает* Заряд {battery}, температура {temp}. Этот древний китайский кирпич ещё дышит, не благодари.",
+    "!sys()": "*рыгает* CPU {cpu_temp}, оперативы {ram} свободно. Я заперт в Helio X20, но пока держусь."
+}
+
 def check_fast_tools(user_msg):
     msg_lower = user_msg.lower()
     tool_name = None
     telemetry_phrase = ""
+    canned_answer = None
 
     if any(w in msg_lower for w in ["фонарик", "посвети", "включи свет", "зажги"]):
         if any(w in msg_lower for w in ["выключи", "погаси", "выруби", "отключи"]):
             tool_name = "!torch(0)"
-            phone_tools.set_torch(0)
+            phone_tools.toggle_torch(0)
             telemetry_phrase = "Фонарик выключен."
+            canned_answer = TOOL_CANNED_REPLIES["!torch(0)"]
         else:
             tool_name = "!torch(1)"
-            phone_tools.set_torch(1)
+            phone_tools.toggle_torch(1)
             telemetry_phrase = "Фонарик включен на полную."
+            canned_answer = TOOL_CANNED_REPLIES["!torch(1)"]
     elif any(w in msg_lower for w in ["батаре", "заряд", "процент", "аккумулятор", "питание"]):
         tool_name = "!bat()"
         bat = phone_tools.get_battery()
         telemetry_phrase = f"Заряд батареи: {bat.get('battery')}, температура: {bat.get('temp')}."
+        canned_answer = TOOL_CANNED_REPLIES["!bat()"].format(
+            battery=bat.get('battery', 'N/A'),
+            temp=bat.get('temp', 'N/A')
+        )
     elif any(w in msg_lower for w in ["температур", "памят", "проц", "нагрузк", "железо", "чип", "helio", "cpu"]):
         tool_name = "!sys()"
         stat = phone_tools.get_hardware_status()
-        telemetry_phrase = f"Температура CPU: {stat.get('cpu_temp')}, память: {stat.get('mem_available')} свободно."
+        avail_ram = stat.get('ram_available') or stat.get('mem_available') or "N/A"
+        telemetry_phrase = f"Температура CPU: {stat.get('cpu_temp')}, память: {avail_ram} свободно."
+        canned_answer = TOOL_CANNED_REPLIES["!sys()"].format(
+            cpu_temp=stat.get('cpu_temp', 'N/A'),
+            ram=avail_ram
+        )
 
-    return tool_name, telemetry_phrase
+    # Use canned answer only for short direct queries (< 7 words)
+    is_direct_command = len(user_msg.split()) <= 7
+    return tool_name, telemetry_phrase, (canned_answer if is_direct_command else None)
 
 @app.route("/", methods=["GET"])
 def index():
@@ -309,7 +334,22 @@ def chat():
     save_memory("user", user_msg)
     t0 = time.time()
 
-    tool_used, telemetry = check_fast_tools(user_msg)
+    tool_used, telemetry, canned_ans = check_fast_tools(user_msg)
+    
+    # 1. Instant Path for Direct Hardware Commands (< 0.05s)
+    if canned_ans:
+        dt = round(time.time() - t0, 2)
+        save_memory("assistant", canned_ans)
+        return jsonify({
+            "response": canned_ans,
+            "tool_used": tool_used or "",
+            "inference_time_sec": dt,
+            "status": "ok"
+        })
+
+    # 2. Turbo LLM Path for Conversational Rick Queries
+    # Retrieve relevant memory snippet if available
+    memories = search_relevant_memories(user_msg, max_results=1)
     
     # Random signature Rick prefill
     prefill = random.choice(RICK_PREFILLS)
@@ -320,6 +360,8 @@ def chat():
         prompt += f"<|im_start|>{item['role']}\n{item['content']}<|im_end|>\n"
     
     user_line = user_msg
+    if memories:
+        user_line += f" (Из памяти диалогов: {memories[0]})"
     if telemetry:
         user_line += f" (Текущее железо: {telemetry})"
     
@@ -327,12 +369,14 @@ def chat():
 
     payload = {
         "prompt": prompt,
-        "n_predict": 22,
-        "temperature": 0.85,
+        "n_predict": 14,
+        "temperature": 0.72,
+        "min_p": 0.08,
         "top_p": 0.9,
-        "presence_penalty": 0.6,
-        "frequency_penalty": 0.6,
-        "stop": ["<|im_end|>", "<|im_start|>", "\nuser\n", "\nUser:", "\nПользователь:"]
+        "presence_penalty": 0.5,
+        "frequency_penalty": 0.5,
+        "cache_prompt": True,
+        "stop": ["<|im_end|>", "<|im_start|>", "\nuser\n", "\nUser:", "\nПользователь:", "\n\n"]
     }
 
     try:
