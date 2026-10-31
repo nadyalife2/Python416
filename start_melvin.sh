@@ -41,6 +41,13 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+echo "=== НАСТРОЙКА СЕТИ И DNS ДЛЯ ALPINE PROOT ==="
+DNS_IP=$(getprop net.dns1)
+if [ -n "$DNS_IP" ]; then
+    echo "nameserver $DNS_IP" > /data/local/tmp/alpine/etc/resolv.conf
+fi
+echo "nameserver 8.8.8.8" >> /data/local/tmp/alpine/etc/resolv.conf
+
 echo "=== ЗАПУСК ОРКЕСТРАТОРА (PYTHON3 • FLASK • FTS5 RAG) ==="
 /data/local/tmp/proot -r /data/local/tmp/alpine -0 -b /dev -b /proc -b /sys -b /sdcard/melvin:/melvin /bin/busybox sh -c '
     export PATH=/bin:/sbin:/usr/bin:/usr/sbin

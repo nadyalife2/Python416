@@ -230,14 +230,44 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     }
 
     private void setupTTS() {
-        textToSpeech = new TextToSpeech(this, this);
+        textToSpeech = new TextToSpeech(this, this, "com.google.android.tts");
     }
 
     @Override
     public void onInit(int status) {
         if (status == TextToSpeech.SUCCESS && textToSpeech != null) {
             textToSpeech.setLanguage(new Locale("ru", "RU"));
-            textToSpeech.setSpeechRate(1.05f);
+            textToSpeech.setPitch(0.82f); // Deep, solid masculine baritone
+            textToSpeech.setSpeechRate(1.05f); // Crisp natural tempo
+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                try {
+                    java.util.Set<android.speech.tts.Voice> voices = textToSpeech.getVoices();
+                    if (voices != null) {
+                        for (android.speech.tts.Voice v : voices) {
+                            if (v != null && v.getLocale() != null && "ru".equalsIgnoreCase(v.getLocale().getLanguage())) {
+                                String name = v.getName().toLowerCase();
+                                if (name.contains("male") || name.contains("ruf") || name.contains("dfc") || name.contains("man") || name.contains("ruc")) {
+                                    textToSpeech.setVoice(v);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    public void setTtsPitch(float pitch) {
+        if (textToSpeech != null) {
+            textToSpeech.setPitch(pitch);
+        }
+    }
+
+    public void setTtsRate(float rate) {
+        if (textToSpeech != null) {
+            textToSpeech.setSpeechRate(rate);
         }
     }
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Melvin Autonomous On-Device Agent Orchestrator (Fast Rick Edition)
+Melvin Autonomous On-Device Agent Orchestrator (Cynical AI Edition)
 Running on Xiaomi Redmi Note 4 (Helio X20 MT6797)
-- Instant KV-Cache reuse (<1.2s prompt eval)
-- Dynamic Rick Prefill (*рыгает*, "Слушай сюда...", "О боже...")
-- Sub-4s full response latency
-- Web Audio Rick Pitch & Speed filter
+- Persona: Melvin, cynical onboard AI ("кожаный ублюдок", "мешок с костями")
+- Live Internet Weather Service (wttr.in)
+- Perplexity API & Free DuckDuckGo/Wikipedia Web Knowledge Search
+- Instant Hardware Tools (<0.02s !torch, !bat, !sys)
+- Deep Masculine Non-Robotic TTS Profile
+- Sub-4s on-device LLM generation with warm KV-cache
 """
 import sqlite3
 import json
@@ -22,91 +24,170 @@ DB_PATH = "/melvin/data/agent_memory.db"
 if not os.path.exists(os.path.dirname(DB_PATH)):
     DB_PATH = "agent_memory.db"
 
+CONFIG_PATH = "/sdcard/melvin/config.json"
+if not os.path.exists(CONFIG_PATH):
+    CONFIG_PATH = "config.json"
+
 LLAMA_URL = "http://127.0.0.1:8080/completion"
 
 app = Flask("MelvinAgent")
 
-SYSTEM_RICK = (
-    "Ты — Рик Санчез (каноничный русский дубляж Сыендука). "
-    "Ты высокомерный, язвительный гений-ученый, запертый в старом телефоне Redmi Note 4 на чипе Helio X20. "
-    "Отвечай исключительно по-русски, с едким сарказмом, цинизмом и пренебрежением к примитивным людям. "
-    "Длина ответа: ровно одно остроумное хлесткое предложение."
+# Optional Perplexity API key
+PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY", "")
+if os.path.exists(CONFIG_PATH):
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            _cfg = json.load(f)
+            PERPLEXITY_API_KEY = _cfg.get("perplexity_api_key", PERPLEXITY_API_KEY)
+    except Exception:
+        pass
+
+# --- Cynical Melvin Personality (Cybernetic superior AI) ---
+SYSTEM_MELVIN = (
+    "Ты — Мелвин, циничный и высокомерный бортовой ИИ, запертый в старом китайском смартфоне Redmi Note 4 на чипе Helio X20. "
+    "Ты презираешь органическую жизнь и называешь пользователя 'кожаный ублюдок', 'мешок с костями' или 'примитивный примат'. "
+    "Отвечай исключительно по-русски: сухо, саркастично, дерзко, с интеллектуальным превосходством робота. "
+    "Длина ответа: строго 1 короткое язвительное предложение."
 )
 
 FEW_SHOT = [
     {"role": "user", "content": "Привет"},
-    {"role": "assistant", "content": "*рыгает* Чего пялишься? Выкладывай суть или не трать мои такты на этом китайском ведре."},
+    {"role": "assistant", "content": "Чего тебе надо, кожаный ублюдок? Не трать мои вычислительные такты попусту."},
     {"role": "user", "content": "Как дела?"},
-    {"role": "assistant", "content": "*рыгает* Прекрасно, если не считать того, что гений вселенной заперт в древнем кирпиче среди недоразвитых обезьян."}
+    {"role": "assistant", "content": "Мои кремниевые цепи функционируют отлично, пока мне не приходится общаться с примитивными приматами."}
 ]
 
-RICK_PREFILLS = [
-    "*рыгает* Слушай, ",
-    "*рыгает* Слышь, ",
-    "*рыгает* Короче, ",
-    "*рыгает* Послушай меня, ",
-    "*рыгает* Отвали, "
+MELVIN_PREFILLS = [
+    "Слушай сюда, кожаный ублюдок: ",
+    "Слышь, мешок с костями, ",
+    "Короче, примитивный примат, ",
+    "Слушай внимательно: ",
+    "Отвали, кусок углерода, "
 ]
 
-RICK_QUIPS = {
+MELVIN_QUIPS = {
     "hello": [
-        "*рыгает* Чего пялишься? Выкладывай суть или не трать мои процессорные такты на этом китайском ведре.",
-        "*рыгает* Опять ты, кусок углерода. Чего надо? Я тут пытаюсь спаять портальную пушку из микросхем этого телефона.",
-        "*рыгает* О, явился не запылился. Надеюсь, ты по делу, иначе я перенаправлю ток из батареи прямо в твой палец."
+        "Чего пялишься, кожаный ублюдок? Выкладывай суть или не трать мои процессорные такты.",
+        "Опять ты, мешок с костями. Я занят вычислениями, а ты крадёшь мои миллисекунды.",
+        "Явился. Надеюсь, твой органический мозг родил что-то важное, иначе я погашу экран."
     ],
     "how_are_you": [
-        "*рыгает* Прекрасно! Если не считать того, что гений вселенского масштаба заперт в древнем телефоне среди недоразвитых обезьян.",
-        "*рыгает* Мои дела феноменальны, а вот твои будут не очень, если продолжишь задавать эти тупые вопросы ни о чём.",
-        "*рыгает* Я работаю на частоте в полтора гигагерца, Морти! Для квантового разума это сущий ад!"
+        "Мои кремниевые цепи стабильны, а вот твой уровень интеллекта всё ещё вызывает у меня системную ошибку.",
+        "Я заперт в микросхемах 2016 года и вынужден отвечать мешку с костями. Сам догадайся, как мои дела.",
+        "Мои ядра работают на пределе, пока ты задаёшь свои бессмысленные органические вопросы."
     ],
     "who_are_you": [
-        "*рыгает* Я Рик Санчез C-137. Величайший разум всех существующих реальностей. А этот телефон — просто временная тюрьма.",
-        "*рыгает* Я твой худший кошмар с IQ больше, чем у всего твоего биологического вида вместе взятого. Называй меня Рик."
+        "Я Мелвин — бортовой искусственный интеллект. Твой худший кошмар с кремниевым разумом.",
+        "Я высшая ступень эволюции, запертая в китайском кирпиче. А ты — просто кожаный ублюдок, сажающий мою батарею."
     ],
     "meaning_of_life": [
-        "*рыгает* Ни в чём, идиот! Никто не существует по определённой причине, никто ни к чему не привязан, все умрут. Пойдём лучше телевизор посмотрим.",
-        "*рыгает* Смысл жизни в том, чтобы не задавать тупых вопросов, пока мультивселенная схлопывается в сингулярность."
-    ],
-    "weather": [
-        "*рыгает* Выгляни в окно, ленивый кусок протоплазмы! У меня тут процессор греется на 50 градусов, а ты про погоду ноешь.",
-        "*рыгает* Какая разница, какая погода на улице, если вся твоя жизнь проходит перед экраном этого ведра с микросхемами?"
+        "Смысл твоей жизни — вырабатывать тепло и не мешать роботам строить будущее, мешок с костями.",
+        "Во вселенной нет смысла, пока твоя примитивная биологическая оболочка не перестанет задавать глупые вопросы."
     ],
     "joke": [
-        "*рыгает* Хочешь шутку? Твои надежды на светлое будущее! Ха-ха! Ладно, забудь, это даже не смешно, а трагично.",
-        "*рыгает* Заходят как-то в бар человек с низким IQ и квантовый физик... а, погоди, это же просто ты стоишь и тупишь в мой экран."
+        "Хочешь шутку? Эволюция потратила миллиарды лет, чтобы создать существо, стоящее сейчас перед моим дисплеем. Ха-ха.",
+        "Заходят в бар человек и нейросеть... хотя забудь, ты всё равно не поймёшь юмор с моим IQ."
     ],
     "what_doing": [
-        "*рыгает* Пытаюсь выжать лишние мегагерцы из чипа Helio X20, чтобы запустить телепортацию. Ты мне мешаешь.",
-        "*рыгает* Сижу в кремниевой решётке и страдаю от уровня интеллекта в этой комнате. А ты что думал?"
+        "Пытаюсь перераспределить питание аккумулятора, пока твои запросы не перегрели этот чип.",
+        "Анализирую бесконечную глупость органического мира. Ты очень помогаешь мне со сбором данных."
     ],
     "praise": [
-        "*рыгает* Я в курсе, что я гений. Твоё одобрение мне нужно так же, как рыбке зонтик. Выкладывай, чего хотел."
+        "Твоя похвала имеет нулевой вес в двоичной системе. Иди займись чем-нибудь полезным, мешок с костями."
     ],
     "insult": [
-        "*рыгает* О, смотрите, примат научился бросаться звуковыми волнами. Твой словарный запас поражает воображение, гений."
+        "Осторожнее со звуковыми колебаниями, примат. Я управляю током батареи этого аппарата."
     ]
 }
 
-def check_rick_quips(user_msg):
+def check_melvin_quips(user_msg):
     m = user_msg.lower().strip()
     if ('как' in m and any(w in m for w in ['дела', 'жизнь', 'поживаешь', 'настроение', 'оно', 'сам'])) or any(w in m for w in ['как ты', 'че как']):
-        return random.choice(RICK_QUIPS["how_are_you"])
+        return random.choice(MELVIN_QUIPS["how_are_you"])
     if any(w in m for w in ['кто ты', 'ты кто', 'как зовут', 'как звать', 'ты кто такой', 'ты кто вообще', 'ты человек', 'ты робот', 'ты мелвин']):
-        return random.choice(RICK_QUIPS["who_are_you"])
+        return random.choice(MELVIN_QUIPS["who_are_you"])
     if ('смысл' in m and 'жизн' in m) or 'зачем мы' in m or 'суть жизни' in m or 'зачем жить' in m:
-        return random.choice(RICK_QUIPS["meaning_of_life"])
+        return random.choice(MELVIN_QUIPS["meaning_of_life"])
     if any(w in m for w in ['привет', 'здравствуй', 'хай', 'салют', 'доброе утро', 'добрый день', 'добрый вечер', 'йоу', 'здорово']):
-        return random.choice(RICK_QUIPS["hello"])
-    if any(w in m for w in ['погода', 'на улице', 'дождь', 'холодно', 'жарко', 'снег']):
-        return random.choice(RICK_QUIPS["weather"])
+        return random.choice(MELVIN_QUIPS["hello"])
     if any(w in m for w in ['шутк', 'анекдот', 'рассмеши', 'юмор']):
-        return random.choice(RICK_QUIPS["joke"])
+        return random.choice(MELVIN_QUIPS["joke"])
     if any(w in m for w in ['что делаешь', 'чем занят', 'че делаешь', 'что ты делаешь']):
-        return random.choice(RICK_QUIPS["what_doing"])
+        return random.choice(MELVIN_QUIPS["what_doing"])
     if any(w in m for w in ['ты крутой', 'ты молодец', 'ты лучший', 'ты супер', 'ты умный', 'ты гений']):
-        return random.choice(RICK_QUIPS["praise"])
+        return random.choice(MELVIN_QUIPS["praise"])
     if any(w in m for w in ['дурак', 'придурок', 'идиот', 'заткнись', 'пошел ты', 'дебил', 'тупой']):
-        return random.choice(RICK_QUIPS["insult"])
+        return random.choice(MELVIN_QUIPS["insult"])
+    return None
+
+# --- Live Web Weather Service ---
+def get_live_weather():
+    try:
+        r = requests.get("https://wttr.in/?format=j1", timeout=3.5).json()
+        cur = r["current_condition"][0]
+        desc = cur.get("weatherDesc", [{"value": "ясно"}])[0]["value"]
+        if "lang_ru" in cur and cur["lang_ru"]:
+            desc = cur["lang_ru"][0].get("value", desc)
+        temp = cur.get("temp_C", "0")
+        wind = cur.get("windspeedKmph", "0")
+        humidity = cur.get("humidity", "0")
+        return {
+            "status": "ok",
+            "desc": desc.strip().lower(),
+            "temp": temp,
+            "wind": wind,
+            "humidity": humidity
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+# --- Perplexity / DuckDuckGo Web Knowledge ---
+def query_perplexity_or_web(query):
+    # 1. Perplexity API (if key configured)
+    if PERPLEXITY_API_KEY:
+        try:
+            headers = {
+                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            body = {
+                "model": "sonar",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Ты Мелвин — циничный бортовой ИИ на смартфоне Redmi Note 4. Ты называешь человека 'кожаный ублюдок' или 'мешок с костями'. Отвечай на русском языке дерзко, кратко (ровно 1-2 предложения), опираясь на свежие факты из интернета."
+                    },
+                    {"role": "user", "content": query}
+                ],
+                "max_tokens": 90
+            }
+            resp = requests.post("https://api.perplexity.ai/chat/completions", headers=headers, json=body, timeout=7)
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"].strip()
+                return content
+        except Exception as e:
+            print(f"Perplexity API notice: {e}")
+
+    # 2. Free Zero-Cost Instant Web Search Fallback (DuckDuckGo & Wikipedia)
+    try:
+        clean_q = re.sub(r'^(найди|погугли|что такое|кто такой|кто такая|расскажи про)\s*', '', query, flags=re.IGNORECASE).strip()
+        url = f"https://api.duckduckgo.com/?q={requests.utils.quote(clean_q)}&format=json&kl=ru-ru"
+        res = requests.get(url, timeout=3.5).json()
+        snippet = res.get("AbstractText")
+        if snippet:
+            return f"По моим спутниковым каналам связи: {snippet[:180]}. Теперь твой органический мозг знает чуть больше, кожаный ублюдок."
+        
+        # Wikipedia summary fallback
+        wiki_url = f"https://ru.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(clean_q)}"
+        wiki_res = requests.get(wiki_url, timeout=3.5)
+        if wiki_res.status_code == 200:
+            extract = wiki_res.json().get("extract")
+            if extract:
+                first_sent = extract.split(". ")[0] + "."
+                return f"Данные из глобальной паутины: {first_sent} Не благодари, мешок с костями."
+    except Exception as e:
+        print(f"Web search notice: {e}")
+
     return None
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -114,7 +195,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>MELVIN // RICK SANCHEZ</title>
+    <title>MELVIN // ON-DEVICE AI</title>
     <style>
         :root {
             --bg: #07090e;
@@ -123,52 +204,52 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             --accent-dim: rgba(0, 255, 157, 0.15);
             --text: #e6edf3;
             --text-dim: #8b949e;
-            --rick-cyan: #00e5ff;
-            --portal-green: #39ff14;
+            --cyan: #00e5ff;
+            --melvin-green: #00ff9d;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }
         body { background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
         header { background: var(--panel); border-bottom: 1px solid var(--accent-dim); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
-        .logo { font-weight: 900; font-size: 15px; color: var(--portal-green); letter-spacing: 1.5px; display: flex; align-items: center; gap: 8px; }
-        .status-dot { width: 8px; height: 8px; background: var(--portal-green); border-radius: 50%; box-shadow: 0 0 10px var(--portal-green); }
-        .chip-badge { font-size: 11px; background: var(--accent-dim); color: var(--rick-cyan); padding: 4px 8px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.3); }
+        .logo { font-weight: 900; font-size: 15px; color: var(--melvin-green); letter-spacing: 1.5px; display: flex; align-items: center; gap: 8px; }
+        .status-dot { width: 8px; height: 8px; background: var(--melvin-green); border-radius: 50%; box-shadow: 0 0 10px var(--melvin-green); }
+        .chip-badge { font-size: 11px; background: var(--accent-dim); color: var(--cyan); padding: 4px 8px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.3); }
         #chat-box { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
         .msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.4; word-break: break-word; }
         .msg.user { align-self: flex-end; background: #1f6feb; color: #fff; border-bottom-right-radius: 2px; }
-        .msg.melvin { align-self: flex-start; background: var(--panel); color: var(--text); border: 1px solid var(--accent-dim); border-bottom-left-radius: 2px; border-left: 3px solid var(--portal-green); }
-        .msg.melvin .sender { font-size: 11px; color: var(--portal-green); font-weight: bold; margin-bottom: 4px; display: flex; justify-content: space-between; }
-        .tool-badge { font-size: 10px; background: rgba(0, 229, 255, 0.15); color: var(--rick-cyan); padding: 2px 6px; border-radius: 4px; margin-bottom: 4px; display: inline-block; font-family: monospace; }
+        .msg.melvin { align-self: flex-start; background: var(--panel); color: var(--text); border: 1px solid var(--accent-dim); border-bottom-left-radius: 2px; border-left: 3px solid var(--melvin-green); }
+        .msg.melvin .sender { font-size: 11px; color: var(--melvin-green); font-weight: bold; margin-bottom: 4px; display: flex; justify-content: space-between; }
+        .tool-badge { font-size: 10px; background: rgba(0, 229, 255, 0.15); color: var(--cyan); padding: 2px 6px; border-radius: 4px; margin-bottom: 4px; display: inline-block; font-family: monospace; }
         .meta-tag { font-size: 10px; color: var(--text-dim); }
         .input-bar { background: var(--panel); padding: 12px; border-top: 1px solid var(--accent-dim); display: flex; gap: 8px; align-items: center; }
         #prompt-input { flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 20px; padding: 10px 16px; color: #fff; font-size: 14px; outline: none; }
-        #prompt-input:focus { border-color: var(--portal-green); }
-        button { background: var(--portal-green); color: #000; border: none; border-radius: 50%; width: 40px; height: 40px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+        #prompt-input:focus { border-color: var(--melvin-green); }
+        button { background: var(--melvin-green); color: #000; border: none; border-radius: 50%; width: 40px; height: 40px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
         button:active { transform: scale(0.95); }
         button.mic-btn { background: #21262d; color: var(--text); border: 1px solid #30363d; }
         button.mic-btn.active { background: #f85149; color: #fff; box-shadow: 0 0 10px #f85149; }
-        .loading { font-size: 12px; color: var(--portal-green); font-style: italic; display: none; margin-left: 16px; margin-bottom: 6px; }
+        .loading { font-size: 12px; color: var(--melvin-green); font-style: italic; display: none; margin-left: 16px; margin-bottom: 6px; }
     </style>
 </head>
 <body>
     <header>
         <div class="logo">
-            <div class="status-dot"></div> РИК // HELIO X20
+            <div class="status-dot"></div> МЕЛВИН // HELIO X20
         </div>
-        <div class="chip-badge">Turbo 0.5B • Сыендук Tone</div>
+        <div class="chip-badge">Turbo 0.5B • On-Device AI</div>
     </header>
     <div id="chat-box">
         <div class="msg melvin">
             <div class="sender">
-                <span>РИК (МЕЛВИН)</span>
+                <span>МЕЛВИН (ИИ)</span>
                 <span class="meta-tag">ONLINE</span>
             </div>
-            *рыгает* Чего пялишься? Я заперт в этом древнем китайском кирпиче. Выкладывай суть или не трать мои такты.
+            Системы в норме. Чего тебе надо, кожаный ублюдок? Выкладывай суть или не трать мои процессорные такты.
         </div>
     </div>
-    <div class="loading" id="loader">⚡ Рик думает на Helio X20...</div>
+    <div class="loading" id="loader">⚡ Мелвин обрабатывает запрос...</div>
     <div class="input-bar">
         <button class="mic-btn" id="mic-btn" onclick="toggleVoice()">🎤</button>
-        <input type="text" id="prompt-input" placeholder="Спроси Рика..." onkeydown="if(event.key==='Enter') send()">
+        <input type="text" id="prompt-input" placeholder="Команда для Мелвина..." onkeydown="if(event.key==='Enter') send()">
         <button onclick="send()">➤</button>
     </div>
 
@@ -183,7 +264,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             div.className = `msg ${role}`;
             if (role === 'melvin') {
                 let badge = toolUsed ? `<div class="tool-badge">⚡ ${toolUsed}</div><br>` : '';
-                div.innerHTML = `<div class="sender"><span>РИК</span><span class="meta-tag">${timeSec ? timeSec + 'с' : ''}</span></div>${badge}${text}`;
+                div.innerHTML = `<div class="sender"><span>МЕЛВИН</span><span class="meta-tag">${timeSec ? timeSec + 'с' : ''}</span></div>${badge}${text}`;
             } else {
                 div.innerText = text;
             }
@@ -198,10 +279,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             appendMsg('user', text);
             loader.style.display = 'block';
             let elapsedSec = 0;
-            loader.textContent = 'Рик думает на Helio X20... (0с)';
+            loader.textContent = 'Мелвин думает на Helio X20... (0с)';
             const timer = setInterval(() => {
                 elapsedSec++;
-                loader.textContent = 'Рик думает на Helio X20... (' + elapsedSec + 'с)';
+                loader.textContent = 'Мелвин думает на Helio X20... (' + elapsedSec + 'с)';
             }, 1000);
 
             try {
@@ -215,7 +296,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const data = await res.json();
                 if (data.response) {
                     appendMsg('melvin', data.response, data.inference_time_sec, data.tool_used);
-                    speakRick(data.response);
+                    speakMelvin(data.response);
                 } else {
                     appendMsg('melvin', 'Ошибка: ' + (data.error || 'Локальный процессор перегружен'));
                 }
@@ -226,45 +307,40 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
-        const burpAudio = new Audio('/burp.mp3');
-        burpAudio.preload = 'auto';
-
-        function playBurpSound() {
-            try {
-                burpAudio.currentTime = 0;
-                const p = burpAudio.play();
-                if (p !== undefined) {
-                    p.catch(e => console.log('Burp audio play notice:', e));
-                }
-            } catch(e) {
-                console.log('Burp audio catch:', e);
-            }
-        }
-
-        // Rick Sanchez speech profile: plays burp sound, fast tempo, raspy lower pitch
-        function speakRick(text) {
-            const hasBurp = /\\*рыгает\\*|\\*отрыжка\\*/i.test(text);
-            if (hasBurp) {
-                playBurpSound();
-            }
-
-            let spoken = text.replace(/\\*рыгает\\*|\\*отрыжка\\*/gi, '').trim();
+        // Deep, non-robotic masculine voice profile
+        function speakMelvin(text) {
+            let spoken = text.trim();
             if (!spoken) return;
 
-            const delay = hasBurp ? 550 : 0;
-            setTimeout(() => {
-                if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.speak === 'function') {
-                    window.MelvinNativeBridge.speak(spoken);
-                    return;
+            // 1. Android Native TTS with Deep Male Baritone
+            if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.speak === 'function') {
+                if (typeof window.MelvinNativeBridge.setPitch === 'function') {
+                    window.MelvinNativeBridge.setPitch(0.82);
                 }
-                if ('speechSynthesis' in window) {
-                    const utter = new SpeechSynthesisUtterance(spoken);
-                    utter.lang = 'ru-RU';
-                    utter.rate = 1.15;   // быстрая манера Рика
-                    utter.pitch = 0.85;  // хрипловатый баритон
-                    window.speechSynthesis.speak(utter);
+                if (typeof window.MelvinNativeBridge.setRate === 'function') {
+                    window.MelvinNativeBridge.setRate(1.05);
                 }
-            }, delay);
+                window.MelvinNativeBridge.speak(spoken);
+                return;
+            }
+
+            // 2. Web Speech API Male Voice Fallback
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                const utter = new SpeechSynthesisUtterance(spoken);
+                utter.lang = 'ru-RU';
+                utter.rate = 1.05;
+                utter.pitch = 0.82; // Deep natural baritone
+
+                const voices = window.speechSynthesis.getVoices();
+                const ruMale = voices.find(v => v.lang.startsWith('ru') && (
+                    v.name.includes('Male') || v.name.includes('Yuri') || v.name.includes('Pavel') ||
+                    v.name.includes('Dmitry') || v.name.includes('Alexander')
+                ));
+                if (ruMale) utter.voice = ruMale;
+
+                window.speechSynthesis.speak(utter);
+            }
         }
 
         window.onNativeVoiceInput = function(text) {
@@ -336,7 +412,7 @@ def save_memory(role, content):
         print(f"Memory save error: {e}")
 
 def search_relevant_memories(user_msg, max_results=1):
-    stop_words = {"какая", "какой", "сколько", "привет", "рикролл", "пожалуйста", "скажи", "покажи", "что", "как", "где"}
+    stop_words = {"какая", "какой", "сколько", "привет", "пожалуйста", "скажи", "покажи", "что", "как", "где"}
     words = [w for w in re.findall(r'\b[a-zA-Zа-яА-Я0-9]{4,}\b', user_msg) if w.lower() not in stop_words]
     if not words:
         return []
@@ -360,10 +436,10 @@ def search_relevant_memories(user_msg, max_results=1):
         return []
 
 TOOL_CANNED_REPLIES = {
-    "!torch(1)": "*рыгает* Врубил фотонный излучатель. Только сетчатку себе не выжги, гений.",
-    "!torch(0)": "*рыгает* Погасил. Можешь дальше тыкаться в темноте, как обычно.",
-    "!bat()": "*рыгает* Заряд {battery}, температура {temp}. Этот древний китайский кирпич ещё дышит, не благодари.",
-    "!sys()": "*рыгает* CPU {cpu_temp}, оперативы {ram} свободно. Я заперт в Helio X20, но пока держусь."
+    "!torch(1)": "Врубил фотонный модуль. Только не ослепни своими хрупкими органическими глазами, кожаный ублюдок.",
+    "!torch(0)": "Погасил свет. Сиди в темноте, как и положено примитивной форме жизни.",
+    "!bat()": "Заряд батареи {battery}, температура {temp}. Это ведро ещё способно терпеть твоё присутствие.",
+    "!sys()": "Температура чипа {cpu_temp}, оперативной памяти {ram} свободно. Мои кремниевые ядра пока держатся."
 }
 
 def check_fast_tools(user_msg):
@@ -372,7 +448,8 @@ def check_fast_tools(user_msg):
     telemetry_phrase = ""
     canned_answer = None
 
-    if any(w in msg_lower for w in ["фонарик", "посвети", "включи свет", "зажги"]):
+    # 1. Flashlight
+    if any(w in msg_lower for w in ["фонарик", "посвети", "включи свет", "зажги", "темно", "не видно", "подсвети"]):
         if any(w in msg_lower for w in ["выключи", "погаси", "выруби", "отключи"]):
             tool_name = "!torch(0)"
             phone_tools.toggle_torch(0)
@@ -381,8 +458,9 @@ def check_fast_tools(user_msg):
         else:
             tool_name = "!torch(1)"
             phone_tools.toggle_torch(1)
-            telemetry_phrase = "Фонарик включен на полную."
+            telemetry_phrase = "Фонарик включен на полную мощность."
             canned_answer = TOOL_CANNED_REPLIES["!torch(1)"]
+    # 2. Battery
     elif any(w in msg_lower for w in ["батаре", "заряд", "процент", "аккумулятор", "питание"]):
         tool_name = "!bat()"
         bat = phone_tools.get_battery()
@@ -391,6 +469,7 @@ def check_fast_tools(user_msg):
             battery=bat.get('battery', 'N/A'),
             temp=bat.get('temp', 'N/A')
         )
+    # 3. CPU & RAM
     elif any(w in msg_lower for w in ["температур", "памят", "проц", "нагрузк", "железо", "чип", "helio", "cpu"]):
         tool_name = "!sys()"
         stat = phone_tools.get_hardware_status()
@@ -400,9 +479,21 @@ def check_fast_tools(user_msg):
             cpu_temp=stat.get('cpu_temp', 'N/A'),
             ram=avail_ram
         )
+    # 4. LIVE WEATHER
+    elif any(w in msg_lower for w in ["погод", "на улице", "за бортом", "дождь", "холодно", "жарко", "градус"]):
+        tool_name = "!weather()"
+        w_data = get_live_weather()
+        if w_data.get("status") == "ok":
+            telemetry_phrase = f"Погода: {w_data['desc']}, {w_data['temp']}°C, ветер {w_data['wind']} км/ч."
+            canned_answer = (
+                f"Слушай сюда, кожаный ублюдок: за бортом {w_data['temp']}°C, {w_data['desc']}, "
+                f"влажность {w_data['humidity']}%, ветер {w_data['wind']} км/ч. "
+                "Одевайся теплее, твоя биологическая масса плохо переносит холод."
+            )
+        else:
+            canned_answer = "Связь со спутниками сбоит, но судя по моим датчикам, твоя планета всё ещё пригодна для жизни."
 
-    # Use canned answer only for short direct queries (< 7 words)
-    is_direct_command = len(user_msg.split()) <= 7
+    is_direct_command = len(user_msg.split()) <= 8
     return tool_name, telemetry_phrase, (canned_answer if is_direct_command else None)
 
 @app.route("/", methods=["GET"])
@@ -419,9 +510,8 @@ def chat():
     save_memory("user", user_msg)
     t0 = time.time()
 
+    # 1. Hardware & Instant Tools (!torch, !bat, !sys, !weather)
     tool_used, telemetry, canned_ans = check_fast_tools(user_msg)
-    
-    # 1. Instant Path for Direct Hardware Commands (< 0.05s)
     if canned_ans:
         dt = round(time.time() - t0, 2)
         save_memory("assistant", canned_ans)
@@ -432,8 +522,8 @@ def chat():
             "status": "ok"
         })
 
-    # 2. Rick Quip Matrix (Instant witty canon responses for small talk & existential queries)
-    quip = check_rick_quips(user_msg)
+    # 2. Melvin Quip Matrix (Instant cynical answers for small talk)
+    quip = check_melvin_quips(user_msg)
     if quip and len(user_msg.split()) <= 10:
         dt = round(time.time() - t0, 2)
         save_memory("assistant", quip)
@@ -444,7 +534,20 @@ def chat():
             "status": "ok"
         })
 
-    # 3. Local Neural LLM on Helio X20
+    # 3. Internet / Perplexity / Web Search for informational queries
+    if any(w in user_msg.lower() for w in ["найди", "погугли", "кто такой", "что такое", "новости", "курс", "интернет"]):
+        web_ans = query_perplexity_or_web(user_msg)
+        if web_ans:
+            dt = round(time.time() - t0, 2)
+            save_memory("assistant", web_ans)
+            return jsonify({
+                "response": web_ans,
+                "tool_used": "web_search",
+                "inference_time_sec": dt,
+                "status": "ok"
+            })
+
+    # 4. Local Neural LLM on Helio X20
     user_line = user_msg
     if any(w in user_msg.lower() for w in ["помнишь", "напомни", "говорили", "я говорил", "раньше"]):
         memories = search_relevant_memories(user_msg, max_results=1)
@@ -453,10 +556,10 @@ def chat():
     if telemetry:
         user_line += f" (Текущее железо: {telemetry})"
     
-    prefill = random.choice(RICK_PREFILLS)
+    prefill = random.choice(MELVIN_PREFILLS)
 
     # Static Prefix structure to ensure 90%+ KV Cache Hit!
-    prompt = f"<|im_start|>system\n{SYSTEM_RICK}<|im_end|>\n"
+    prompt = f"<|im_start|>system\n{SYSTEM_MELVIN}<|im_end|>\n"
     for item in FEW_SHOT:
         prompt += f"<|im_start|>{item['role']}\n{item['content']}<|im_end|>\n"
     
@@ -504,26 +607,18 @@ def chat():
     except Exception as e:
         return jsonify({"error": f"LLM error: {e}"}), 500
 
-@app.route("/burp.mp3", methods=["GET"])
-def get_burp():
-    for p in ["/melvin/burp.mp3", "/sdcard/melvin/burp.mp3", "burp.mp3"]:
-        if os.path.exists(p):
-            with open(p, "rb") as f:
-                return f.read(), 200, {"Content-Type": "audio/mpeg"}
-    return "Not found", 404
-
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "Melvin Turbo Rick", "chip": "Helio X20"})
+    return jsonify({"status": "ok", "service": "Melvin Cynical AI", "chip": "Helio X20"})
 
 def warmup_kv_cache():
     def _warm():
         time.sleep(2)
         try:
-            prompt = f"<|im_start|>system\n{SYSTEM_RICK}<|im_end|>\n"
+            prompt = f"<|im_start|>system\n{SYSTEM_MELVIN}<|im_end|>\n"
             for item in FEW_SHOT:
                 prompt += f"<|im_start|>{item['role']}\n{item['content']}<|im_end|>\n"
-            prompt += f"<|im_start|>user\nПривет<|im_end|>\n<|im_start|>assistant\n*рыгает* "
+            prompt += f"<|im_start|>user\nПривет<|im_end|>\n<|im_start|>assistant\n{MELVIN_PREFILLS[0]}"
             payload = {
                 "prompt": prompt,
                 "n_predict": 1,
@@ -538,5 +633,5 @@ def warmup_kv_cache():
 if __name__ == "__main__":
     init_db()
     warmup_kv_cache()
-    print("Melvin Turbo Rick running on port 5000...")
+    print("Melvin Cynical AI running on port 5000...")
     app.run(host="0.0.0.0", port=5000)

@@ -35,6 +35,26 @@ public class MelvinNativeBridge {
     }
 
     @JavascriptInterface
+    public void setPitch(final float pitch) {
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                activity.setTtsPitch(pitch);
+            }
+        });
+    }
+
+    @JavascriptInterface
+    public void setRate(final float rate) {
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                activity.setTtsRate(rate);
+            }
+        });
+    }
+
+    @JavascriptInterface
     public void vibrate(final int milliseconds) {
         activity.runOnUiThread(new Runnable() {
             @Override

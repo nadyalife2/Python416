@@ -29,7 +29,7 @@ $d8 = "$buildTools\d8.bat"
 $zipalign = "$buildTools\zipalign.exe"
 $apksigner = "$buildTools\apksigner.bat"
 $androidJar = "$sdk\platforms\android-34\android.jar"
-$adb = "C:\Program Files (x86)\OnePlus USB Drivers\Android\adb.exe"
+$adb = "C:\Users\MSI\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 
 $env:JAVA_HOME = $javaHome
 $env:PATH = "$javaHome\bin;$env:PATH"
