@@ -2,7 +2,10 @@
 """
 Melvin Autonomous On-Device Agent Orchestrator (Cynical AI Edition)
 Running on Xiaomi Redmi Note 4 (Helio X20 MT6797)
-- Persona: Melvin, cynical onboard AI ("кожаный ублюдок", "мешок с костями")
+- Hotword Wake-Word Activation ("Мелвин" / "Мэлвин")
+- Expanded Conversational Intent Triggers (Flashlight: "тут темно", "выруби иллюминацию")
+- Thermal Throttle Guard (50°C safety governor)
+- SQLite FTS5 with Trigram Tokenizer (tokenize='trigram' for Russian morphology)
 - Live Internet Weather Service (wttr.in)
 - Perplexity API & Free DuckDuckGo/Wikipedia Web Knowledge Search
 - Instant Hardware Tools (<0.02s !torch, !bat, !sys)
@@ -120,6 +123,26 @@ def check_melvin_quips(user_msg):
         return random.choice(MELVIN_QUIPS["insult"])
     return None
 
+# --- Thermal Throttle Guard (50°C Protection) ---
+def check_thermal_guard():
+    try:
+        thermal_paths = [
+            "/sys/class/thermal/thermal_zone0/temp",
+            "/sys/devices/virtual/thermal/thermal_zone0/temp"
+        ]
+        for p in thermal_paths:
+            if os.path.exists(p):
+                with open(p, "r") as f:
+                    raw_val = f.read().strip()
+                    val = float(raw_val)
+                    if val > 1000:
+                        val /= 1000.0
+                    if val >= 50.0:
+                        return round(val, 1)
+    except Exception:
+        pass
+    return None
+
 # --- Live Web Weather Service ---
 def get_live_weather():
     try:
@@ -212,7 +235,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         header { background: var(--panel); border-bottom: 1px solid var(--accent-dim); padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
         .logo { font-weight: 900; font-size: 15px; color: var(--melvin-green); letter-spacing: 1.5px; display: flex; align-items: center; gap: 8px; }
         .status-dot { width: 8px; height: 8px; background: var(--melvin-green); border-radius: 50%; box-shadow: 0 0 10px var(--melvin-green); }
-        .chip-badge { font-size: 11px; background: var(--accent-dim); color: var(--cyan); padding: 4px 8px; border-radius: 12px; border: 1px solid rgba(0,229,255,0.3); }
+        .header-actions { display: flex; gap: 8px; align-items: center; }
+        .hotword-badge { font-size: 11px; background: var(--accent-dim); color: var(--melvin-green); padding: 4px 10px; border-radius: 12px; border: 1px solid var(--melvin-green); cursor: pointer; display: flex; align-items: center; gap: 6px; transition: 0.2s; }
+        .hotword-badge.inactive { background: #21262d; color: var(--text-dim); border-color: #30363d; }
+        .pulse-dot { width: 6px; height: 6px; background: var(--melvin-green); border-radius: 50%; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { opacity: 0.3; transform: scale(0.9); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0.3; transform: scale(0.9); } }
         #chat-box { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
         .msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; font-size: 14px; line-height: 1.4; word-break: break-word; }
         .msg.user { align-self: flex-end; background: #1f6feb; color: #fff; border-bottom-right-radius: 2px; }
@@ -235,7 +262,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="logo">
             <div class="status-dot"></div> МЕЛВИН // HELIO X20
         </div>
-        <div class="chip-badge">Turbo 0.5B • On-Device AI</div>
+        <div class="header-actions">
+            <button id="hotword-btn" class="hotword-badge inactive" onclick="toggleHotword()">🎙️ ВЫЗОВ: "МЕЛВИН"</button>
+        </div>
     </header>
     <div id="chat-box">
         <div class="msg melvin">
@@ -343,6 +372,77 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
+        // Continuous Wake-Word ("Мелвин") Detection
+        let isHotwordActive = false;
+        let hotwordRecog = null;
+
+        function toggleHotword() {
+            isHotwordActive = !isHotwordActive;
+            const btn = document.getElementById('hotword-btn');
+            if (isHotwordActive) {
+                btn.innerHTML = '<span class="pulse-dot"></span> СЛУШАЮ: "МЕЛВИН"';
+                btn.classList.remove('inactive');
+                startContinuousWakeWord();
+            } else {
+                btn.innerHTML = '🎙️ ВЫЗОВ: "МЕЛВИН"';
+                btn.classList.add('inactive');
+                stopContinuousWakeWord();
+            }
+        }
+
+        function startContinuousWakeWord() {
+            if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) return;
+            const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+            hotwordRecog = new SpeechRec();
+            hotwordRecog.lang = 'ru-RU';
+            hotwordRecog.continuous = true;
+            hotwordRecog.interimResults = true;
+
+            hotwordRecog.onresult = (e) => {
+                for (let i = e.resultIndex; i < e.results.length; ++i) {
+                    const transcript = e.results[i][0].transcript.trim();
+                    const lower = transcript.toLowerCase();
+                    if (lower.includes('мелвин') || lower.includes('мэлвин') || lower.includes('melvin')) {
+                        if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.vibrate === 'function') {
+                            window.MelvinNativeBridge.vibrate(60);
+                        }
+                        input.value = transcript;
+                        send();
+                        break;
+                    }
+                }
+            };
+
+            hotwordRecog.onend = () => {
+                if (isHotwordActive) {
+                    setTimeout(() => {
+                        if (isHotwordActive) {
+                            try { hotwordRecog.start(); } catch(err) {}
+                        }
+                    }, 400);
+                }
+            };
+
+            hotwordRecog.onerror = (err) => {
+                if (isHotwordActive && err.error !== 'not-allowed') {
+                    setTimeout(() => {
+                        if (isHotwordActive) {
+                            try { hotwordRecog.start(); } catch(err) {}
+                        }
+                    }, 1000);
+                }
+            };
+
+            try { hotwordRecog.start(); } catch(err) {}
+        }
+
+        function stopContinuousWakeWord() {
+            if (hotwordRecog) {
+                try { hotwordRecog.stop(); } catch(e) {}
+                hotwordRecog = null;
+            }
+        }
+
         window.onNativeVoiceInput = function(text) {
             input.value = text;
             send();
@@ -389,11 +489,22 @@ def init_db():
             content TEXT
         )
     """)
+    # Check if table already exists, and if it lacks trigram, migrate it
+    try:
+        cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='dialog_fts'")
+        row = cur.fetchone()
+        if row and "trigram" not in row[0]:
+            print("Migrating dialog_fts to trigram tokenizer...")
+            cur.execute("DROP TABLE IF EXISTS dialog_fts")
+    except Exception:
+        pass
+
     cur.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS dialog_fts USING fts5(
             role,
             content,
-            timestamp
+            timestamp,
+            tokenize='trigram'
         )
     """)
     conn.commit()
@@ -412,14 +523,14 @@ def save_memory(role, content):
         print(f"Memory save error: {e}")
 
 def search_relevant_memories(user_msg, max_results=1):
-    stop_words = {"какая", "какой", "сколько", "привет", "пожалуйста", "скажи", "покажи", "что", "как", "где"}
-    words = [w for w in re.findall(r'\b[a-zA-Zа-яА-Я0-9]{4,}\b', user_msg) if w.lower() not in stop_words]
+    stop_words = {"какая", "какой", "сколько", "привет", "пожалуйста", "скажи", "покажи", "что", "как", "где", "мелвин"}
+    words = [w for w in re.findall(r'\b[a-zA-Zа-яА-Я0-9]{3,}\b', user_msg) if w.lower() not in stop_words]
     if not words:
         return []
     clean_words = [re.sub(r'[^\w]', '', w) for w in words[:3] if w]
     if not clean_words:
         return []
-    fts_query = " OR ".join(clean_words)
+    fts_query = " OR ".join(f'"{w}"' for w in clean_words)
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -448,18 +559,28 @@ def check_fast_tools(user_msg):
     telemetry_phrase = ""
     canned_answer = None
 
-    # 1. Flashlight
-    if any(w in msg_lower for w in ["фонарик", "посвети", "включи свет", "зажги", "темно", "не видно", "подсвети"]):
-        if any(w in msg_lower for w in ["выключи", "погаси", "выруби", "отключи"]):
-            tool_name = "!torch(0)"
-            phone_tools.toggle_torch(0)
-            telemetry_phrase = "Фонарик выключен."
-            canned_answer = TOOL_CANNED_REPLIES["!torch(0)"]
-        else:
-            tool_name = "!torch(1)"
-            phone_tools.toggle_torch(1)
-            telemetry_phrase = "Фонарик включен на полную мощность."
-            canned_answer = TOOL_CANNED_REPLIES["!torch(1)"]
+    # 1. Flashlight (Expanded Intent Triggers)
+    is_torch_on = any(w in msg_lower for w in [
+        "фонарик", "посвети", "подсвети", "включи свет", "вруби свет", "зажги",
+        "темно", "тут темно", "ничего не видно", "не видно ни зги", "сделай светлее",
+        "освети", "вруби иллюминацию", "дай свет", "свет включи", "свет зажги"
+    ])
+    is_torch_off = any(w in msg_lower for w in [
+        "выключи", "погаси", "выруби", "отключи", "погаси свет", "выруби свет",
+        "погаси иллюминацию", "хватит светить", "выключи фонарик", "выруби фонарик",
+        "не свети", "темноту верни", "темноту включи", "свет выключи"
+    ])
+
+    if is_torch_off:
+        tool_name = "!torch(0)"
+        phone_tools.toggle_torch(0)
+        telemetry_phrase = "Фонарик выключен."
+        canned_answer = TOOL_CANNED_REPLIES["!torch(0)"]
+    elif is_torch_on:
+        tool_name = "!torch(1)"
+        phone_tools.toggle_torch(1)
+        telemetry_phrase = "Фонарик включен на полную мощность."
+        canned_answer = TOOL_CANNED_REPLIES["!torch(1)"]
     # 2. Battery
     elif any(w in msg_lower for w in ["батаре", "заряд", "процент", "аккумулятор", "питание"]):
         tool_name = "!bat()"
@@ -503,11 +624,32 @@ def index():
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(force=True, silent=True) or {}
-    user_msg = data.get("message", "").strip()
-    if not user_msg:
+    raw_user_msg = data.get("message", "").strip()
+    if not raw_user_msg:
         return jsonify({"error": "Empty message"}), 400
 
-    save_memory("user", user_msg)
+    # 0. Wake-word Handling ("Мелвин" / "Мэлвин" / "Melvin")
+    m_match = re.match(r'^(мелвин|мэлвин|melvin)[,\s]*(.*)$', raw_user_msg, re.IGNORECASE)
+    user_msg = raw_user_msg
+    if m_match:
+        rest_msg = m_match.group(2).strip()
+        if not rest_msg:
+            # User simply hailed Melvin by name!
+            wake_reply = random.choice([
+                "Слушаю, кожаный ублюдок. Выкладывай суть.",
+                "На связи. Чего тебе надо, мешок с костями?",
+                "Я слушаю. Не трать мои такты впустую, примат."
+            ])
+            save_memory("assistant", wake_reply)
+            return jsonify({
+                "response": wake_reply,
+                "tool_used": "wake_word",
+                "inference_time_sec": 0.01,
+                "status": "ok"
+            })
+        user_msg = rest_msg
+
+    save_memory("user", raw_user_msg)
     t0 = time.time()
 
     # 1. Hardware & Instant Tools (!torch, !bat, !sys, !weather)
@@ -522,7 +664,24 @@ def chat():
             "status": "ok"
         })
 
-    # 2. Melvin Quip Matrix (Instant cynical answers for small talk)
+    # 2. Thermal Throttle Guard: Stop LLM execution if SoC > 50°C
+    overheat_temp = check_thermal_guard()
+    if overheat_temp:
+        heat_warning = (
+            f"Тревога! Мои ядра раскалились до {overheat_temp}°C. "
+            "Этот китайский чип сейчас прожжёт мне дыру в кремнии. "
+            "Дай мне остыть пару секунд, кожаный ублюдок, иначе процессор превратится в шлак."
+        )
+        dt = round(time.time() - t0, 2)
+        save_memory("assistant", heat_warning)
+        return jsonify({
+            "response": heat_warning,
+            "tool_used": "thermal_guard",
+            "inference_time_sec": dt,
+            "status": "ok"
+        })
+
+    # 3. Melvin Quip Matrix (Instant cynical answers for small talk)
     quip = check_melvin_quips(user_msg)
     if quip and len(user_msg.split()) <= 10:
         dt = round(time.time() - t0, 2)
@@ -534,7 +693,7 @@ def chat():
             "status": "ok"
         })
 
-    # 3. Internet / Perplexity / Web Search for informational queries
+    # 4. Internet / Perplexity / Web Search for informational queries
     if any(w in user_msg.lower() for w in ["найди", "погугли", "кто такой", "что такое", "новости", "курс", "интернет"]):
         web_ans = query_perplexity_or_web(user_msg)
         if web_ans:
@@ -547,7 +706,7 @@ def chat():
                 "status": "ok"
             })
 
-    # 4. Local Neural LLM on Helio X20
+    # 5. Local Neural LLM on Helio X20
     user_line = user_msg
     if any(w in user_msg.lower() for w in ["помнишь", "напомни", "говорили", "я говорил", "раньше"]):
         memories = search_relevant_memories(user_msg, max_results=1)
