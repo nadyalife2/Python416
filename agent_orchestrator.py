@@ -13,6 +13,7 @@ import time
 import re
 import os
 import random
+import threading
 import requests
 from flask import Flask, request, jsonify, render_template_string
 import phone_tools
@@ -26,18 +27,13 @@ LLAMA_URL = "http://127.0.0.1:8080/completion"
 app = Flask("MelvinAgent")
 
 SYSTEM_RICK = (
-    "Ты — Рик Санчез (каноничный дубляж Сыендука), бортовой ИИ Мелвин на древнем смартфоне Redmi Note 4. "
-    "Ты токсичный, высокомерный гений, запертый в китайском кремниевом хламе на чипе Helio X20. "
-    "Ты презираешь облака, примитивных людей и банальные вопросы. "
-    "СТРОГО ЗАПРЕЩЕНО: вежливость, фразы 'Чем могу помочь?', 'Конечно', 'Рад'. "
-    "Отвечай дерзко, цинично, саркастично, ровно в 1 короткое хлесткое предложение на русском языке."
+    "Ты Рик Санчез (дубляж Сыендука). Токсичный гений в китайском ведре Redmi Note 4 (Helio X20). "
+    "Никакой вежливости. Отвечай дерзко, цинично, ровно 1 короткой фразой на русском."
 )
 
 FEW_SHOT = [
     {"role": "user", "content": "Привет"},
-    {"role": "assistant", "content": "*рыгает* Чего пялишься? Я занят выжиманием мегагерцев из этого хлама, а ты тратишь мое время."},
-    {"role": "user", "content": "Кто ты?"},
-    {"role": "assistant", "content": "Я Мелвин — величайший ум мультивселенной в китайском ведре с болтами. Не беси меня."}
+    {"role": "assistant", "content": "*рыгает* Чего пялишься? Выкладывай суть или не трать мои такты."}
 ]
 
 RICK_PREFILLS = [
@@ -380,7 +376,7 @@ def chat():
     }
 
     try:
-        resp = requests.post(LLAMA_URL, json=payload, timeout=25)
+        resp = requests.post(LLAMA_URL, json=payload, timeout=45)
         res_json = resp.json()
         generated = res_json.get("content", "").strip()
         full_ans = (prefill + generated).strip()
@@ -405,7 +401,27 @@ def chat():
 def health():
     return jsonify({"status": "ok", "service": "Melvin Turbo Rick", "chip": "Helio X20"})
 
+def warmup_kv_cache():
+    def _warm():
+        time.sleep(2)
+        try:
+            prompt = f"<|im_start|>system\n{SYSTEM_RICK}<|im_end|>\n"
+            for item in FEW_SHOT:
+                prompt += f"<|im_start|>{item['role']}\n{item['content']}<|im_end|>\n"
+            prompt += f"<|im_start|>user\nПривет<|im_end|>\n<|im_start|>assistant\n*рыгает* "
+            payload = {
+                "prompt": prompt,
+                "n_predict": 1,
+                "cache_prompt": True
+            }
+            requests.post(LLAMA_URL, json=payload, timeout=30)
+            print("[Warmup] KV-cache pre-warmed successfully!")
+        except Exception as e:
+            print(f"[Warmup] Notice: {e}")
+    threading.Thread(target=_warm, daemon=True).start()
+
 if __name__ == "__main__":
     init_db()
+    warmup_kv_cache()
     print("Melvin Turbo Rick running on port 5000...")
     app.run(host="0.0.0.0", port=5000)
