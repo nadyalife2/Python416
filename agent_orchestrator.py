@@ -308,7 +308,7 @@ def query_perplexity_or_web(query, persona="melvin"):
 # ==========================================
 # 4. WEB UI TEMPLATE (Hands-Free Listening)
 # ==========================================
-HTML_TEMPLATE = """<!DOCTYPE html>
+HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
@@ -457,18 +457,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         let dialogueActiveUntil = 0; // Timestamp when continuous multi-turn dialogue expires
 
         function onBotSpeechFinished() {
-            isBotSpeaking = false;
-            // Activate continuous dialogue window for 20 seconds
-            dialogueActiveUntil = Date.now() + 20000;
+            console.log('[TTS] Speech finished. Applying 700ms acoustic cooldown buffer...');
+            setTimeout(() => {
+                isBotSpeaking = false;
+                speechBuffer = [];
+                preRollQueue = [];
+                silenceCount = 0;
+                maxRmsInPhrase = 0;
 
-            // Short vibration pulse to signal mic is wide open
-            if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.vibrate === 'function') {
-                window.MelvinNativeBridge.vibrate(35);
-            }
+                // Continuous dialogue active for 25 seconds
+                dialogueActiveUntil = Date.now() + 25000;
 
-            vadIndicator.classList.add('dialogue-active');
-            vadText.textContent = 'ДИАЛОГ: ГОВОРИТЕ...';
-            console.log('[Dialogue] Bot speech done. Mic is OPEN for command!');
+                // Short vibration pulse to signal mic is wide open for user command
+                if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.vibrate === 'function') {
+                    window.MelvinNativeBridge.vibrate(45);
+                }
+
+                vadIndicator.classList.add('dialogue-active');
+                vadIndicator.classList.remove('recording');
+                vadText.textContent = 'ДИАЛОГ: ГОВОРИТЕ...';
+                console.log('[Dialogue] Bot speech done. Mic is OPEN for command!');
+            }, 700);
         }
 
         function applyNativeVoiceSettings() {
@@ -548,6 +557,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 loader.textContent = name + ' думает на Helio X20... (' + elapsedSec + 'с)';
             }, 1000);
 
+            isSendingChat = true;
             try {
                 const res = await fetch('/chat', {
                     method: 'POST',
@@ -580,6 +590,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 clearInterval(timer);
                 loader.style.display = 'none';
                 appendMsg('bot', 'Сбой соединения: ' + e);
+            } finally {
+                isSendingChat = false;
             }
         }
 
@@ -598,6 +610,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (!raw) return;
 
             isBotSpeaking = true;
+            speechBuffer = [];
+            preRollQueue = [];
+            silenceCount = 0;
+            maxRmsInPhrase = 0;
+
+            vadIndicator.classList.remove('recording', 'dialogue-active');
+            vadText.textContent = (currentPersona === 'rick') ? 'РИК ГОВОРИТ...' : 'МЕЛВИН ГОВОРИТ...';
+
             const isRick = (currentPersona === 'rick');
             const hasBurp = isRick || /\*рыгает\*|\*отрыжка\*/i.test(raw);
             const cleanText = raw.replace(/\*рыгает\*|\*отрыжка\*/gi, '').trim();
@@ -606,7 +626,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 playBurpSound();
                 setTimeout(() => {
                     executeVoiceOutput(cleanText);
-                }, 550);
+                }, 750);
             } else {
                 executeVoiceOutput(cleanText);
             }
@@ -614,9 +634,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         function executeVoiceOutput(spoken) {
             applyNativeVoiceSettings();
-            // Accurate speech duration based on word count (~280ms per word + 350ms margin)
+            // Conservative speech duration (pitch 0.40 bass, Russian words average 480ms + 1200ms latency)
             const words = spoken.trim().split(/\s+/).filter(Boolean);
-            const speechDurationMs = Math.max(900, words.length * 280 + 350);
+            const speechDurationMs = Math.max(1600, words.length * 480 + 1200);
 
             // 1. Android Native TTS
             if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.speak === 'function') {
@@ -688,7 +708,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         let isCapturingSpeech = false;
         let speechBuffer = [];
         let silenceCount = 0;
-        let vadThreshold = 0.022; // RMS voice sensitivity threshold
+        let maxRmsInPhrase = 0;
+        const PRE_ROLL_CHUNKS = 2; // ~512ms pre-speech audio buffer
+        let preRollQueue = [];
+        let isTranscribing = false;
+        let isSendingChat = false;
 
         async function initHandsFreeWakeWord() {
             try {
@@ -709,14 +733,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const source = audioContext.createMediaStreamSource(audioStream);
                 // ScriptProcessorNode for real-time RMS & chunk collection
                 const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                
+                // Route through a zero-gain node to prevent any audio feedback through phone speaker!
+                const zeroGain = audioContext.createGain();
+                zeroGain.gain.value = 0;
 
                 source.connect(processor);
-                processor.connect(audioContext.destination);
+                processor.connect(zeroGain);
+                zeroGain.connect(audioContext.destination);
 
                 processor.onaudioprocess = (e) => {
-                    if (isBotSpeaking) {
+                    if (isBotSpeaking || isTranscribing || isSendingChat) {
                         speechBuffer = [];
-                        isCapturingSpeech = false;
+                        silenceCount = 0;
+                        maxRmsInPhrase = 0;
                         return;
                     }
 
@@ -728,41 +758,72 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     const rms = Math.sqrt(sum / inputData.length);
 
                     const isDialogueActive = Date.now() < dialogueActiveUntil;
-                    // In active dialogue, increase sensitivity so user can speak naturally
-                    const currentThreshold = isDialogueActive ? 0.016 : 0.022;
+                    // Robust thresholds: 0.026 in dialogue, 0.030 in standby
+                    const currentThreshold = isDialogueActive ? 0.026 : 0.030;
 
                     if (rms > currentThreshold) {
                         silenceCount = 0;
                         if (!isCapturingSpeech) {
                             isCapturingSpeech = true;
                             speechBuffer = [];
+                            maxRmsInPhrase = rms;
+                            // Prepend pre-roll chunks so initial syllable is never cut off!
+                            for (let p of preRollQueue) {
+                                speechBuffer.push(p);
+                            }
                             vadIndicator.classList.add('recording');
                             vadText.textContent = isDialogueActive ? 'СЛУШАЮ КОМАНДУ...' : 'ЗАПИСЬ РЕЧИ...';
+                        } else {
+                            if (rms > maxRmsInPhrase) maxRmsInPhrase = rms;
                         }
                     } else if (isCapturingSpeech) {
                         silenceCount++;
+                    } else {
+                        // Keep rolling pre-roll buffer when idle
+                        preRollQueue.push(new Float32Array(inputData));
+                        if (preRollQueue.length > PRE_ROLL_CHUNKS) {
+                            preRollQueue.shift();
+                        }
                     }
 
                     if (isCapturingSpeech) {
                         speechBuffer.push(new Float32Array(inputData));
 
-                        // Finish phrase when 3 silence chunks detected (~768ms) OR max 20 chunks (~5.1s)
-                        if (silenceCount >= 3 || speechBuffer.length >= 20) {
+                        // Finalize phrase when 5 chunks of silence (~1.28s) OR max 24 chunks (~6.1s)
+                        if (silenceCount >= 5 || speechBuffer.length >= 24) {
                             isCapturingSpeech = false;
                             vadIndicator.classList.remove('recording');
-                            vadText.textContent = 'РАСПОЗНАВАНИЕ...';
 
-                            let totalLen = 0;
-                            for (let b of speechBuffer) totalLen += b.length;
-                            const flat = new Float32Array(totalLen);
-                            let off = 0;
-                            for (let b of speechBuffer) {
-                                flat.set(b, off);
-                                off += b.length;
-                            }
+                            const captured = speechBuffer;
                             speechBuffer = [];
+                            preRollQueue = [];
+                            const peak = maxRmsInPhrase;
+                            maxRmsInPhrase = 0;
 
-                            processSpeechChunk(flat, isDialogueActive);
+                            // Require at least 4 chunks (~1.0s) and peak RMS >= 0.032
+                            if (captured.length >= 4 && peak >= 0.032) {
+                                vadText.textContent = 'РАСПОЗНАВАНИЕ...';
+
+                                let totalLen = 0;
+                                for (let b of captured) totalLen += b.length;
+                                const flat = new Float32Array(totalLen);
+                                let off = 0;
+                                for (let b of captured) {
+                                    flat.set(b, off);
+                                    off += b.length;
+                                }
+
+                                processSpeechChunk(flat, isDialogueActive);
+                            } else {
+                                console.log('[Hands-Free] Discarded noise/too short:', captured.length, 'chunks, peak RMS:', peak);
+                                if (isDialogueActive) {
+                                    vadIndicator.classList.add('dialogue-active');
+                                    vadText.textContent = 'ДИАЛОГ: ГОВОРИТЕ...';
+                                } else {
+                                    vadIndicator.classList.remove('dialogue-active');
+                                    vadText.textContent = 'СЛУШАЮ: "МЕЛВИН / РИК"';
+                                }
+                            }
                         }
                     } else {
                         // When idle: show dialogue mode or standby
@@ -785,6 +846,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         async function processSpeechChunk(samples, wasDialogueActive) {
+            if (isTranscribing) return;
+            isTranscribing = true;
             try {
                 const wavBlob = encodeWAV(samples, 16000);
                 const res = await fetch('/transcribe_audio', {
@@ -801,30 +864,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     const isWakeHail = lower.includes('мелвин') || lower.includes('мэлвин') || lower.includes('melvin') ||
                                       lower.includes('рик') || lower.includes('rick');
 
-                    // If wake word was detected OR if dialogue was already active:
+                    // If wake word was detected OR if dialogue was active OR isWaitingForCommand:
                     if (isWakeHail || wasDialogueActive || isWaitingForCommand) {
-                        // Check if user wants to exit dialogue
+                        // User can say "стоп" / "хватит" / "отмена" to exit continuous dialogue
                         if (lower.includes('стоп') || lower.includes('хватит') || lower.includes('отмена') || lower.includes('заткнись')) {
                             dialogueActiveUntil = 0;
                             isWaitingForCommand = false;
                             appendMsg('user', text);
-                            appendMsg('bot', 'Диалог окончен. Слушаю оклик.');
+                            appendMsg('bot', 'Диалог завершен. Слушаю оклик.');
                             vadIndicator.classList.remove('dialogue-active');
                             vadText.textContent = 'СЛУШАЮ: "МЕЛВИН / РИК"';
                             return;
                         }
 
-                        // Extend active dialogue by 20 seconds!
-                        dialogueActiveUntil = Date.now() + 20000;
+                        // Extend active dialogue by 25 seconds!
+                        dialogueActiveUntil = Date.now() + 25000;
 
                         if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.vibrate === 'function') {
                             window.MelvinNativeBridge.vibrate(40);
                         }
                         send(text);
+                    } else {
+                        console.log('[Hands-Free] Ignored speech outside dialogue (not wake-word):', text);
                     }
+                } else {
+                    console.log('[Hands-Free] STT result:', data.status);
                 }
             } catch(e) {
                 console.log('[Hands-Free] STT error:', e);
+            } finally {
+                isTranscribing = false;
             }
         }
 
@@ -1015,19 +1084,32 @@ def set_persona():
 
 @app.route("/transcribe_audio", methods=["POST"])
 def transcribe_audio():
+    t_start = time.time()
     try:
         audio_data = request.get_data()
-        if not audio_data or len(audio_data) < 1000:
+        if not audio_data or len(audio_data) < 4000:
             return jsonify({"status": "empty", "text": ""})
+        
+        wav_len = len(audio_data) - 44
+        duration = max(0.1, wav_len / 32000.0)
+        
+        try:
+            with open("/sdcard/melvin/last_stt_debug.wav", "wb") as f_dbg:
+                f_dbg.write(audio_data)
+        except Exception:
+            pass
         
         buf = io.BytesIO(audio_data)
         with sr.AudioFile(buf) as source:
             audio = speech_rec.record(source)
             
         text = speech_rec.recognize_google(audio, language="ru-RU")
-        print(f"[Hands-Free STT] Recognized: '{text}'")
-        return jsonify({"status": "ok", "text": text})
+        dt = round(time.time() - t_start, 2)
+        print(f"[Hands-Free STT] ({duration:.1f}s audio in {dt}s) Recognized: '{text}'")
+        return jsonify({"status": "ok", "text": text, "duration": duration})
     except sr.UnknownValueError:
+        dt = round(time.time() - t_start, 2)
+        print(f"[Hands-Free STT] ({duration:.1f}s audio in {dt}s) No speech detected (silence/noise)")
         return jsonify({"status": "no_speech", "text": ""})
     except Exception as e:
         print(f"[Hands-Free STT error]: {e}")
