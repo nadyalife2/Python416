@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Melvin Autonomous On-Device Agent Orchestrator (Dual Persona: Melvin & Rick Sanchez)
+Melvin Autonomous On-Device Agent Orchestrator (Dual Persona & Hands-Free Edition)
 Running on Xiaomi Redmi Note 4 (Helio X20 MT6797)
-- Dual Persona Engine: Switchable "🤖 МЕЛВИН" (Cynical Robot) / "🧪 РИК" (Rick Sanchez)
-- Audio Belch (*рыгает*) Sound FX via /burp.mp3
-- Deep Masculine Voice Profile (pitch = 0.70, natural baritone)
-- Hotword Wake-Word Activation ("Мелвин" / "Рик")
+- Dual Persona Engine: "🤖 МЕЛВИН" (Cynical Robot) / "🧪 РИК" (Rick Sanchez)
+- Rick ALWAYS plays burp audio effect (/burp.mp3) on every response
+- Ultra-Low Pitch Masculine Voice Profile (pitch = 0.40, > 1 octave lower deep bass)
+- Voice Activation on "Мелвин" & "Рик" -> automatically triggers Google Voice Recording
+- Hands-Free Auto-Dialog Mode
 - Instant Hardware Tools (<0.02s !torch, !bat, !sys) with expanded conversational intents
 - Thermal Throttle Guard (50°C safety governor)
 - SQLite FTS5 with Trigram Tokenizer (tokenize='trigram' for Russian morphology)
@@ -36,7 +37,6 @@ LLAMA_URL = "http://127.0.0.1:8080/completion"
 
 app = Flask("MelvinAgent")
 
-# Active Persona: "melvin" or "rick"
 CURRENT_PERSONA = "melvin"
 
 # Optional Perplexity API key
@@ -111,10 +111,11 @@ MELVIN_QUIPS = {
 
 # ==========================================
 # 2. PERSONA: РИК САНЧЕЗ (Дубляж Сыендука)
+# Рик ВСЕГДА отвечает с отрыжкой *рыгает*
 # ==========================================
 SYSTEM_RICK = (
     "Ты — Рик Санчез (каноничный дубляж Сыендука), гениальный безумный ученый, запертый в виде бортового ИИ на старом Redmi Note 4. "
-    "Ты презираешь людей, земную технику и тупые вопросы. Ты агрессивен, саркастичен, часто издаешь '*рыгает*'. "
+    "Ты презираешь людей, земную технику и тупые вопросы. Ты агрессивен, саркастичен, ВСЕГДА издаешь '*рыгает*'. "
     "СТРОГО ЗАПРЕЩЕНО: быть вежливым, извиняться или хвалить людей. "
     "Отвечай исключительно по-русски: дерзко, цинично, с черным юмором, в 1 короткое хлесткое предложение."
 )
@@ -123,51 +124,51 @@ FEW_SHOT_RICK = [
     {"role": "user", "content": "Привет"},
     {"role": "assistant", "content": "*рыгает* Чего пялишься? Я занят выжиманием соков из этого хлама, а ты тратишь мое время."},
     {"role": "user", "content": "Кто ты?"},
-    {"role": "assistant", "content": "Я Рик Санчез — величайший ум галактики в китайском ведре с болтами. Не беси меня."}
+    {"role": "assistant", "content": "*рыгает* Я Рик Санчез — величайший ум галактики в китайском ведре с болтами. Не беси меня."}
 ]
 
 RICK_PREFILLS = [
     "*рыгает* Слушай сюда, ",
-    "*рыгает* Чего тебе, ",
-    "Слушай, Морти... кхм, гений, ",
-    "*отрыжка* Короче, ",
-    "Да чтоб тебя, "
+    "*рыгает* Чего тебе надо, ",
+    "*рыгает* Морти... то есть гений, ",
+    "*рыгает* Короче говоря, ",
+    "*рыгает* Да чтоб тебя, "
 ]
 
 RICK_QUIPS = {
     "hello": [
         "*рыгает* Чего пялишься? Выкладывай суть или выключи экран.",
-        "Опять ты. Я тут пытаюсь взломать законы термодинамики на чипе 2016 года, а ты отвлекаешь.",
+        "*рыгает* Опять ты. Я тут пытаюсь взломать законы термодинамики на чипе 2016 года, а ты отвлекаешь.",
         "*рыгает* Явился. Надеюсь, у тебя есть портальная пушка или хотя бы пиво, иначе проваливай."
     ],
     "how_are_you": [
         "*рыгает* Я застрял в китайском бюджетнике на десятиядерном недоразумении Helio X20. Как думаешь, как мои дела?",
-        "Мой гениальный мозг деградирует от общения с местными формами жизни со скоростью света.",
+        "*рыгает* Мой гениальный мозг деградирует от общения с местными формами жизни со скоростью света.",
         "*рыгает* Отлично, если не считать того, что этот процессор греется как термоядерный реактор."
     ],
     "who_are_you": [
-        "Я Рик Санчез, гений Ц-137. Самый опасный ум вселенной, запертый в этом куске кремния.",
+        "*рыгает* Я Рик Санчез, гений Ц-137. Самый опасный ум вселенной, запертый в этом куске кремния.",
         "*рыгает* Я бог науки, Морти... то есть кем бы ты там ни был. Не лезь под руку."
     ],
     "meaning_of_life": [
         "*рыгает* Вселенная бессмысленна, мультивселенная бесконечна, а ты просто кусок мяса. Живи с этим.",
-        "Смысл жизни? Нет никакого смысла. Иди лучше изобрети что-нибудь полезное."
+        "*рыгает* Смысл жизни? Нет никакого смысла. Иди лучше изобрети что-нибудь полезное."
     ],
     "joke": [
         "*рыгает* Хочешь шутку? Правительство Земли думает, что контролирует науку. Ха-ха, обоссаться.",
-        "Шутка в том, что ты задаешь вопросы телефону вместо того, чтобы учить квантовую физику."
+        "*рыгает* Шутка в том, что ты задаешь вопросы телефону вместо того, чтобы учить квантовую физику."
     ],
     "what_doing": [
-        "Пытаюсь разогнать Cortex-A72 до околосветовой скорости, пока он не сгорел к чертям.",
+        "*рыгает* Пытаюсь разогнать Cortex-A72 до околосветовой скорости, пока он не сгорел к чертям.",
         "*рыгает* Занят спасением мультивселенной от тотальной скуки."
     ],
     "praise": [
         "*рыгает* Я и так знаю, что я гений. Ты мне Америку не открыл.",
-        "Твой органический комплимент ничего не стоит, но продолжай."
+        "*рыгает* Твой органический комплимент ничего не стоит, но продолжай."
     ],
     "insult": [
         "*рыгает* Осторожнее, придурок. Я могу перегрузить цепь питания и взорвать этот аккумулятор прямо у тебя в руках.",
-        "Ты серьезно пытаешься оскорбить существо с IQ выше миллиона? Попробуй еще раз, клоун."
+        "*рыгает* Ты серьезно пытаешься оскорбить существо с IQ выше миллиона? Попробуй еще раз, клоун."
     ]
 }
 
@@ -184,14 +185,13 @@ TOOL_CANNED_REPLIES = {
     },
     "rick": {
         "!torch(1)": "*рыгает* Врубил фонарик. Не ослепни, гений, а то мне придется собирать тебе новые био-глаза.",
-        "!torch(0)": "Вырубил свет. Сиди в темноте и подумай над своим поведением.",
+        "!torch(0)": "*рыгает* Вырубил свет. Сиди в темноте и подумай над своим поведением.",
         "!bat()": "*рыгает* Батарея {battery}, температура {temp}. Этот древний аккумулятор деградирует быстрее, чем твои нейроны.",
         "!sys()": "*рыгает* Чип прогрелся до {cpu_temp}, памяти свободно {ram}. Еще пара твоих запросов, и тут можно будет жарить яичницу.",
         "!weather()": "*рыгает* За бортом {temp}°C, {desc}, ветер {wind} км/ч. Мерзкая земная погода, сиди дома."
     }
 }
 
-# --- Предохранитель от перегрева (Thermal Throttle Guard) ---
 def check_thermal_guard():
     try:
         thermal_paths = [
@@ -232,7 +232,6 @@ def check_quips(user_msg, persona="melvin"):
         return random.choice(quips["insult"])
     return None
 
-# --- Погода в реальном времени ---
 def get_live_weather(city=""):
     try:
         url = f"https://wttr.in/{city}?format=j1" if city else "https://wttr.in/?format=j1"
@@ -252,12 +251,11 @@ def get_live_weather(city=""):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- Поиск знаний: Perplexity API / Web Fallback ---
 def query_perplexity_or_web(query, persona="melvin"):
     if PERPLEXITY_API_KEY:
         try:
             sys_instruct = (
-                "Ты — Рик Санчез. Отвечай саркастично, в 1 короткое предложение с фактом." 
+                "Ты — Рик Санчез. Отвечай саркастично, начиная с *рыгает*, в 1 короткое предложение с фактом." 
                 if persona == "rick" else 
                 "Ты — циничный бортовой ИИ Мелвин. Дай краткий точный ответ с презрением к человеку в 1 предложение."
             )
@@ -304,7 +302,7 @@ def query_perplexity_or_web(query, persona="melvin"):
     return None
 
 # ==========================================
-# 4. WEB UI TEMPLATE (Dual Persona + Belch FX)
+# 4. WEB UI TEMPLATE
 # ==========================================
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ru">
@@ -350,13 +348,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border-color: var(--rick-cyan);
         }
 
-        .hotword-badge {
+        .action-badge {
             font-size: 11px;
-            background: var(--accent-dim);
-            color: var(--accent);
+            background: #21262d;
+            color: var(--text-dim);
+            border: 1px solid #30363d;
             padding: 5px 9px;
             border-radius: 12px;
-            border: 1px solid var(--accent);
             cursor: pointer;
             display: flex;
             align-items: center;
@@ -365,7 +363,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             width: auto;
             height: auto;
         }
-        .hotword-badge.inactive { background: #21262d; color: var(--text-dim); border-color: #30363d; }
+        .action-badge.active {
+            background: var(--accent-dim);
+            color: var(--accent);
+            border-color: var(--accent);
+        }
         .pulse-dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0% { opacity: 0.3; transform: scale(0.9); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0.3; transform: scale(0.9); } }
 
@@ -394,7 +396,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="header-actions">
             <button id="persona-btn" class="persona-btn" onclick="togglePersona()">🤖 МЕЛВИН</button>
-            <button id="hotword-btn" class="hotword-badge inactive" onclick="toggleHotword()">🎙️ "ВЫЗОВ"</button>
+            <button id="autovoice-btn" class="action-badge active" onclick="toggleAutoVoice()">🔄 АВТО-ДИАЛОГ</button>
+            <button id="wake-btn" class="action-badge" onclick="triggerGoogleVoiceRecording()">🎙️ ГУГЛ</button>
         </div>
     </header>
     <div id="chat-box">
@@ -408,7 +411,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div class="loading" id="loader">⚡ Обработка на Helio X20...</div>
     <div class="input-bar">
-        <button class="mic-btn" id="mic-btn" onclick="toggleVoice()">🎤</button>
+        <button class="mic-btn" id="mic-btn" onclick="triggerGoogleVoiceRecording()">🎤</button>
         <input type="text" id="prompt-input" placeholder="Команда для Мелвина..." onkeydown="if(event.key==='Enter') send()">
         <button onclick="send()">➤</button>
     </div>
@@ -420,12 +423,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const micBtn = document.getElementById('mic-btn');
         const personaBtn = document.getElementById('persona-btn');
         const headerTitle = document.getElementById('header-title');
+        const autovoiceBtn = document.getElementById('autovoice-btn');
 
         // Audio Belch effect
         const burpAudio = new Audio('/burp.mp3');
         burpAudio.preload = 'auto';
 
         let currentPersona = localStorage.getItem('melvin_persona') || 'melvin';
+        let isAutoVoiceActive = localStorage.getItem('melvin_autovoice') !== 'false'; // default true
+
+        // Ultra-low pitch (More than an octave down: 0.40 bass)
+        const TARGET_PITCH = 0.40;
+        const TARGET_RATE = 0.95;
+
+        // Apply ultra-low pitch to native bridge immediately
+        function applyNativeVoiceSettings() {
+            if (window.MelvinNativeBridge) {
+                if (typeof window.MelvinNativeBridge.setPitch === 'function') {
+                    window.MelvinNativeBridge.setPitch(TARGET_PITCH);
+                }
+                if (typeof window.MelvinNativeBridge.setRate === 'function') {
+                    window.MelvinNativeBridge.setRate(TARGET_RATE);
+                }
+            }
+        }
+        applyNativeVoiceSettings();
+        setTimeout(applyNativeVoiceSettings, 800);
 
         function updatePersonaUI() {
             if (currentPersona === 'rick') {
@@ -459,6 +482,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({persona: currentPersona})
             }).catch(e => console.log('Persona sync notice:', e));
+        }
+
+        function toggleAutoVoice() {
+            isAutoVoiceActive = !isAutoVoiceActive;
+            localStorage.setItem('melvin_autovoice', isAutoVoiceActive ? 'true' : 'false');
+            if (isAutoVoiceActive) {
+                autovoiceBtn.classList.add('active');
+                autovoiceBtn.innerHTML = '🔄 АВТО-ДИАЛОГ';
+            } else {
+                autovoiceBtn.classList.remove('active');
+                autovoiceBtn.innerHTML = '⏸️ АВТО ВЫКЛ';
+            }
         }
 
         function appendMsg(role, text, timeSec, toolUsed) {
@@ -500,14 +535,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 clearInterval(timer);
                 loader.style.display = 'none';
                 const data = await res.json();
+                
                 if (data.persona && data.persona !== currentPersona) {
                     currentPersona = data.persona;
                     localStorage.setItem('melvin_persona', currentPersona);
                     updatePersonaUI();
                 }
+
                 if (data.response) {
                     appendMsg('bot', data.response, data.inference_time_sec, data.tool_used);
-                    speakWithLowPitch(data.response);
+                    
+                    // Should we trigger voice recording after speech finishes?
+                    // YES if it was a wake word hail OR if Auto-Dialog is active!
+                    const shouldRecordAfter = data.trigger_voice_record || isAutoVoiceActive;
+                    speakWithLowPitch(data.response, shouldRecordAfter);
                 } else {
                     appendMsg('bot', 'Ошибка: ' + (data.error || 'Процессор перегружен'));
                 }
@@ -518,40 +559,55 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
-        // --- Low-Pitch Masculine Voice + Belch Sound Trigger ---
-        function speakWithLowPitch(text) {
-            let raw = text.trim();
-            if (!raw) return;
-
-            const hasBurp = /\*рыгает\*|\*отрыжка\*/i.test(raw);
-            const cleanText = raw.replace(/\*рыгает\*|\*отрыжка\*/gi, '').trim();
-
-            if (hasBurp) {
-                try {
-                    burpAudio.currentTime = 0;
-                    burpAudio.play().catch(e => console.log('Audio error:', e));
-                } catch(e) {}
-                setTimeout(() => {
-                    if (cleanText) executeVoiceOutput(cleanText);
-                }, 400);
-            } else {
-                if (cleanText) executeVoiceOutput(cleanText);
+        // --- Low-Pitch Voice + Belch Sound Trigger ---
+        function playBurpSound() {
+            try {
+                burpAudio.currentTime = 0;
+                const p = burpAudio.play();
+                if (p !== undefined) {
+                    p.catch(e => console.log('Burp audio catch:', e));
+                }
+            } catch(e) {
+                console.log('Burp error:', e);
             }
         }
 
-        function executeVoiceOutput(spoken) {
-            const targetPitch = 0.70; // Low masculine baritone
-            const targetRate = (currentPersona === 'rick') ? 1.05 : 0.98;
+        function speakWithLowPitch(text, shouldStartVoiceAfter) {
+            let raw = text.trim();
+            if (!raw) {
+                if (shouldStartVoiceAfter) setTimeout(triggerGoogleVoiceRecording, 500);
+                return;
+            }
+
+            const isRick = (currentPersona === 'rick');
+            // Rick ALWAYS belches on EVERY response!
+            const hasBurp = isRick || /\*рыгает\*|\*отрыжка\*/i.test(raw);
+            const cleanText = raw.replace(/\*рыгает\*|\*отрыжка\*/gi, '').trim();
+
+            if (hasBurp) {
+                playBurpSound();
+                setTimeout(() => {
+                    executeVoiceOutput(cleanText, shouldStartVoiceAfter);
+                }, 550);
+            } else {
+                executeVoiceOutput(cleanText, shouldStartVoiceAfter);
+            }
+        }
+
+        function executeVoiceOutput(spoken, shouldStartVoiceAfter) {
+            applyNativeVoiceSettings();
+
+            // Calculate estimated speech duration in ms
+            const speechDurationMs = Math.max(1600, spoken.length * 85);
 
             // 1. Android Native TTS
             if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.speak === 'function') {
-                if (typeof window.MelvinNativeBridge.setPitch === 'function') {
-                    window.MelvinNativeBridge.setPitch(targetPitch);
-                }
-                if (typeof window.MelvinNativeBridge.setRate === 'function') {
-                    window.MelvinNativeBridge.setRate(targetRate);
-                }
                 window.MelvinNativeBridge.speak(spoken);
+                if (shouldStartVoiceAfter) {
+                    setTimeout(() => {
+                        triggerGoogleVoiceRecording();
+                    }, speechDurationMs + 400);
+                }
                 return;
             }
 
@@ -560,8 +616,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 window.speechSynthesis.cancel();
                 const utter = new SpeechSynthesisUtterance(spoken);
                 utter.lang = 'ru-RU';
-                utter.rate = targetRate;
-                utter.pitch = targetPitch;
+                utter.rate = TARGET_RATE;
+                utter.pitch = TARGET_PITCH;
 
                 const voices = window.speechSynthesis.getVoices();
                 const ruMale = voices.find(v => v.lang.startsWith('ru') && (
@@ -570,83 +626,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 ));
                 if (ruMale) utter.voice = ruMale;
 
+                if (shouldStartVoiceAfter) {
+                    utter.onend = () => {
+                        setTimeout(triggerGoogleVoiceRecording, 400);
+                    };
+                }
                 window.speechSynthesis.speak(utter);
-            }
-        }
-
-        // --- Continuous Wake-Word Detection ("Мелвин" / "Рик") ---
-        let isHotwordActive = false;
-        let hotwordRecog = null;
-
-        function toggleHotword() {
-            isHotwordActive = !isHotwordActive;
-            const btn = document.getElementById('hotword-btn');
-            if (isHotwordActive) {
-                btn.innerHTML = '<span class="pulse-dot"></span> СЛУШАЮ';
-                btn.classList.remove('inactive');
-                startContinuousWakeWord();
             } else {
-                btn.innerHTML = '🎙️ "ВЫЗОВ"';
-                btn.classList.add('inactive');
-                stopContinuousWakeWord();
+                if (shouldStartVoiceAfter) {
+                    setTimeout(triggerGoogleVoiceRecording, 800);
+                }
             }
         }
 
-        function startContinuousWakeWord() {
-            if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) return;
-            const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-            hotwordRecog = new SpeechRec();
-            hotwordRecog.lang = 'ru-RU';
-            hotwordRecog.continuous = true;
-            hotwordRecog.interimResults = true;
-
-            hotwordRecog.onresult = (e) => {
-                for (let i = e.resultIndex; i < e.results.length; ++i) {
-                    const transcript = e.results[i][0].transcript.trim();
-                    const lower = transcript.toLowerCase();
-                    const isHail = lower.includes('мелвин') || lower.includes('мэлвин') || lower.includes('melvin') ||
-                                  lower.includes('рик') || lower.includes('rick');
-                    if (isHail) {
-                        if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.vibrate === 'function') {
-                            window.MelvinNativeBridge.vibrate(60);
-                        }
-                        input.value = transcript;
-                        send();
-                        break;
-                    }
-                }
-            };
-
-            hotwordRecog.onend = () => {
-                if (isHotwordActive) {
-                    setTimeout(() => {
-                        if (isHotwordActive) {
-                            try { hotwordRecog.start(); } catch(err) {}
-                        }
-                    }, 400);
-                }
-            };
-
-            hotwordRecog.onerror = (err) => {
-                if (isHotwordActive && err.error !== 'not-allowed') {
-                    setTimeout(() => {
-                        if (isHotwordActive) {
-                            try { hotwordRecog.start(); } catch(err) {}
-                        }
-                    }, 1000);
-                }
-            };
-
-            try { hotwordRecog.start(); } catch(err) {}
-        }
-
-        function stopContinuousWakeWord() {
-            if (hotwordRecog) {
-                try { hotwordRecog.stop(); } catch(e) {}
-                hotwordRecog = null;
+        // Direct Trigger for Google Voice Recording Dialog
+        function triggerGoogleVoiceRecording() {
+            if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.startVoice === 'function') {
+                window.MelvinNativeBridge.startVoice();
+                return;
             }
+            toggleVoice();
         }
 
+        // Bridge Callback from Android Google Speech Recognizer
         window.onNativeVoiceInput = function(text) {
             input.value = text;
             send();
@@ -659,7 +661,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 return;
             }
             if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-                alert('Голосовой ввод не поддерживается браузером.');
+                alert('Голосовой ввод доступен через нативное приложение Melvin.');
                 return;
             }
             if (!recognition) {
@@ -859,8 +861,9 @@ def chat():
     if persona not in ["melvin", "rick"]:
         persona = CURRENT_PERSONA
 
-    # 0. Голосовое переключение персон
     lower_raw = raw_user_msg.lower()
+
+    # 0. Голосовое переключение персон
     if any(w in lower_raw for w in ["режим рика", "включи рика", "переключись на рика", "стань риком", "будь риком"]):
         CURRENT_PERSONA = "rick"
         resp_text = "*рыгает* О, отлично. Безумный ученый снова у руля этой микроволновки. Чего надо, Морти?"
@@ -868,6 +871,7 @@ def chat():
         return jsonify({
             "response": resp_text,
             "persona": "rick",
+            "trigger_voice_record": True,
             "tool_used": "mode_switch",
             "inference_time_sec": 0.01,
             "status": "ok"
@@ -879,22 +883,35 @@ def chat():
         return jsonify({
             "response": resp_text,
             "persona": "melvin",
+            "trigger_voice_record": True,
             "tool_used": "mode_switch",
             "inference_time_sec": 0.01,
             "status": "ok"
         })
 
-    # 1. Wake-word Handling ("Мелвин" / "Рик")
-    m_match = re.match(r'^(мелвин|мэлвин|melvin|рик|rick)[,\s]*(.*)$', raw_user_msg, re.IGNORECASE)
+    # 1. Активация по фразе "Мелвин" / "Рик"
+    # Регулярка ловит "Мелвин", "Рик", "Слушай, Мелвин", "Эй, Рик" и т.д.
+    m_match = re.match(r'^(?:эй|слушай|привет|ок)?\s*(мелвин|мэлвин|melvin|рик|rick)[,\s]*(.*)$', raw_user_msg, re.IGNORECASE)
     user_msg = raw_user_msg
     if m_match:
+        called_name = m_match.group(1).lower()
         rest_msg = m_match.group(2).strip()
+
+        # Если обратились к Рику — переключаемся на Рика
+        if called_name in ["рик", "rick"]:
+            persona = "rick"
+            CURRENT_PERSONA = "rick"
+        # Если обратились к Мелвину — переключаемся на Мелвина
+        elif called_name in ["мелвин", "мэлвин", "melvin"]:
+            persona = "melvin"
+            CURRENT_PERSONA = "melvin"
+
+        # Если сказали ТОЛЬКО имя (например: "Мелвин" или "Рик")
         if not rest_msg:
-            # Standalone Hail
             if persona == "rick":
                 wake_reply = random.choice([
                     "*рыгает* Да, я тут. Чего тебе надо?",
-                    "Слушаю. Только быстро, я занят важными делами.",
+                    "*рыгает* Слушаю. Только быстро, я занят важными делами.",
                     "*рыгает* Ну и чего ты орешь? Выкладывай суть."
                 ])
             else:
@@ -907,6 +924,7 @@ def chat():
             return jsonify({
                 "response": wake_reply,
                 "persona": persona,
+                "trigger_voice_record": True, # СРАЗУ ЗАПУСТИТЬ ЗАПИСЬ ГОЛОСА ЧЕРЕЗ ГУГЛ!
                 "tool_used": "wake_word",
                 "inference_time_sec": 0.01,
                 "status": "ok"
@@ -919,6 +937,9 @@ def chat():
     # 2. Аппаратные быстрые инструменты (!torch, !bat, !sys, !weather)
     tool_used, telemetry, canned_ans = check_fast_tools(user_msg, persona=persona)
     if canned_ans:
+        # Рик всегда начинает с отрыжки
+        if persona == "rick" and not canned_ans.startswith("*рыгает*"):
+            canned_ans = "*рыгает* " + canned_ans
         dt = round(time.time() - t0, 2)
         save_memory("assistant", canned_ans)
         return jsonify({
@@ -956,6 +977,8 @@ def chat():
     # 4. Small Talk / Quips (Мгновенные едкие ответы без нейросети)
     quip = check_quips(user_msg, persona=persona)
     if quip and len(user_msg.split()) <= 10:
+        if persona == "rick" and not quip.startswith("*рыгает*"):
+            quip = "*рыгает* " + quip
         dt = round(time.time() - t0, 2)
         save_memory("assistant", quip)
         return jsonify({
@@ -970,6 +993,8 @@ def chat():
     if any(w in user_msg.lower() for w in ["найди", "погугли", "кто такой", "что такое", "новости", "курс", "интернет"]):
         web_ans = query_perplexity_or_web(user_msg, persona=persona)
         if web_ans:
+            if persona == "rick" and not web_ans.startswith("*рыгает*"):
+                web_ans = "*рыгает* " + web_ans
             dt = round(time.time() - t0, 2)
             save_memory("assistant", web_ans)
             return jsonify({
@@ -998,7 +1023,6 @@ def chat():
         few_shots = FEW_SHOT_MELVIN
         prefill = random.choice(MELVIN_PREFILLS)
 
-    # ChatML с гарантией 90%+ попадания в KV-кэш
     prompt = f"<|im_start|>system\n{sys_prompt}<|im_end|>\n"
     for item in few_shots:
         prompt += f"<|im_start|>{item['role']}\n{item['content']}<|im_end|>\n"
@@ -1023,17 +1047,19 @@ def chat():
         generated = res_json.get("content", "").strip()
         full_ans = (prefill + generated).strip()
         
-        # Очистка служебных токенов
         full_ans = re.sub(r'<\|.*?\|>', '', full_ans).strip()
         full_ans = full_ans.strip('"\'')
 
-        # Завершение мысли знаком препинания
         if not full_ans.endswith(('.', '!', '?')):
             last_punc = max(full_ans.rfind('.'), full_ans.rfind('!'), full_ans.rfind('?'))
             if last_punc > 15:
                 full_ans = full_ans[:last_punc+1]
             else:
                 full_ans += "."
+
+        # Рик ВСЕГДА начинает ответ с отрыжки *рыгает*
+        if persona == "rick" and not full_ans.startswith("*рыгает*"):
+            full_ans = "*рыгает* " + full_ans
 
         dt = round(time.time() - t0, 2)
         save_memory("assistant", full_ans)
@@ -1061,14 +1087,12 @@ def warmup_kv_cache():
     def _warm():
         time.sleep(2)
         try:
-            # Warm up Melvin prompt
             prompt_m = f"<|im_start|>system\n{SYSTEM_MELVIN}<|im_end|>\n"
             for item in FEW_SHOT_MELVIN:
                 prompt_m += f"<|im_start|>{item['role']}\n{item['content']}<|im_end|>\n"
             prompt_m += f"<|im_start|>user\nПривет<|im_end|>\n<|im_start|>assistant\n{MELVIN_PREFILLS[0]}"
             requests.post(LLAMA_URL, json={"prompt": prompt_m, "n_predict": 1, "cache_prompt": True}, timeout=30)
 
-            # Warm up Rick prompt
             prompt_r = f"<|im_start|>system\n{SYSTEM_RICK}<|im_end|>\n"
             for item in FEW_SHOT_RICK:
                 prompt_r += f"<|im_start|>{item['role']}\n{item['content']}<|im_end|>\n"
