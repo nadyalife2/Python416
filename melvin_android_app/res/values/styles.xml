@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Melvin" parent="android:Theme.NoTitleBar">
+        <item name="android:windowBackground">@color/melvin_bg</item>
+        <item name="android:colorBackground">@color/melvin_bg</item>
+        <item name="android:textColor">@color/melvin_text</item>
+    </style>
+</resources>

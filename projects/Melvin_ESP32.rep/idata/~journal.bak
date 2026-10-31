@@ -1,0 +1,2 @@
+IADD:00000000:/esp32s3_rom.elf
+IDSET:/esp32s3_rom.elf:ac10db2ccc217382055403999

@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/melvin_bg">
+
+    <!-- Top Action / Status Bar -->
+    <LinearLayout
+        android:id="@+id/headerBar"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@color/melvin_panel"
+        android:paddingLeft="12dp"
+        android:paddingRight="12dp">
+
+        <ImageView
+            android:id="@+id/imgStatusDot"
+            android:layout_width="10dp"
+            android:layout_height="10dp"
+            android:src="@drawable/dot_online"
+            android:contentDescription="Status Indicator" />
+
+        <TextView
+            android:id="@+id/txtHeaderTitle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginLeft="10dp"
+            android:text="MELVIN AI // CORE"
+            android:textColor="@color/melvin_accent"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/badgeSoc"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingLeft="8dp"
+            android:paddingTop="3dp"
+            android:paddingRight="8dp"
+            android:paddingBottom="3dp"
+            android:layout_marginRight="8dp"
+            android:background="#1a00e5ff"
+            android:text="Helio X20"
+            android:textColor="@color/melvin_cyan"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnWakeLock"
+            android:layout_width="40dp"
+            android:layout_height="34dp"
+            android:layout_marginRight="4dp"
+            android:background="#161b22"
+            android:text="☀️"
+            android:textColor="@color/melvin_text_dim"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btnVoice"
+            android:layout_width="40dp"
+            android:layout_height="34dp"
+            android:layout_marginRight="4dp"
+            android:background="#161b22"
+            android:text="🎤"
+            android:textColor="@color/melvin_accent"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btnReload"
+            android:layout_width="40dp"
+            android:layout_height="34dp"
+            android:background="#161b22"
+            android:text="⟳"
+            android:textColor="@color/melvin_text"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <!-- Main View Frame: WebView + Offline/Loading Screen -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <WebView
+            android:id="@+id/webView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/melvin_bg" />
+
+        <!-- Offline / Reconnect Overlay -->
+        <LinearLayout
+            android:id="@+id/layoutOffline"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="@color/melvin_bg"
+            android:padding="24dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:gravity="center_horizontal"
+                android:background="@drawable/bg_cyber_card"
+                android:padding="20dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="MELVIN OFFLINE"
+                    android:textColor="@color/melvin_error"
+                    android:textSize="18sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/txtOfflineDesc"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Ядро Мелвина (llama-server + Flask) не отвечает на порту 5000.\nУбедитесь, что демон запущен в PRoot на устройстве."
+                    android:textColor="@color/melvin_text_dim"
+                    android:textSize="13sp"
+                    android:gravity="center"
+                    android:layout_marginBottom="20dp" />
+
+                <ProgressBar
+                    android:id="@+id/progressConnect"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:layout_marginBottom="20dp" />
+
+                <Button
+                    android:id="@+id/btnRetry"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:background="@drawable/btn_cyber_accent"
+                    android:text="Повторить подключение"
+                    android:textColor="#000000"
+                    android:textStyle="bold"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="10dp" />
+
+                <Button
+                    android:id="@+id/btnStartDaemon"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:background="#21262d"
+                    android:text="Запустить демон в фоне"
+                    android:textColor="@color/melvin_cyan"
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+    </FrameLayout>
+
+</LinearLayout>

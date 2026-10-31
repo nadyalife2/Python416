@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="melvin_bg">#0a0e14</color>
+    <color name="melvin_panel">#131924</color>
+    <color name="melvin_card">#161b22</color>
+    <color name="melvin_accent">#00ff9d</color>
+    <color name="melvin_cyan">#00e5ff</color>
+    <color name="melvin_text">#e6edf3</color>
+    <color name="melvin_text_dim">#8b949e</color>
+    <color name="melvin_error">#f85149</color>
+    <color name="melvin_status_online">#00ff9d</color>
+    <color name="melvin_status_offline">#ff4444</color>
+</resources>

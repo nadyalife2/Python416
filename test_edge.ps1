@@ -1,0 +1,2 @@
+$adb = "C:\Program Files (x86)\OnePlus USB Drivers\Android\adb.exe"
+& $adb shell "PROOT_TMP_DIR=/data/local/tmp /data/local/tmp/proot -r /data/local/tmp/alpine -0 -b /dev -b /proc -b /sys /bin/busybox sh -c 'PATH=/bin:/sbin:/usr/bin:/usr/sbin; echo https://dl-cdn.alpinelinux.org/alpine/edge/testing >> /etc/apk/repositories; echo https://dl-cdn.alpinelinux.org/alpine/edge/community >> /etc/apk/repositories; apk update; apk search llama'"

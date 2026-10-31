@@ -1,0 +1,14 @@
+# Melvin ReAct Grammar for llama-server
+# Enforces compact reasoning, strict tool calling syntax, and short punchy response
+
+root ::= (think_block)? (tool_call | text_response)
+
+think_block ::= "<think>\n" [^<]* "</think>\n"
+
+tool_call ::= "CALL: !" tool_name "(" tool_arg ")" "\n"
+
+tool_name ::= "bat" | "sys" | "torch" | "mem"
+
+tool_arg ::= [^\)\n]*
+
+text_response ::= [^\n]+ ("\n" [^\n]+)?

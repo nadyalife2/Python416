@@ -1,0 +1,5 @@
+$adb = "C:\Program Files (x86)\OnePlus USB Drivers\Android\adb.exe"
+& $adb shell "echo 'nameserver 8.8.8.8' > /data/local/tmp/alpine/etc/resolv.conf"
+& $adb shell "echo 'nameserver 1.1.1.1' >> /data/local/tmp/alpine/etc/resolv.conf"
+& $adb shell "chmod 755 /data/local/tmp/alpine/sbin/apk"
+& $adb shell "PROOT_TMP_DIR=/data/local/tmp /data/local/tmp/proot -r /data/local/tmp/alpine -0 -b /dev -b /proc -b /sys /bin/busybox sh -c 'PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk update'"

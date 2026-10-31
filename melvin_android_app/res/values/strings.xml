@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Melvin AI</string>
+    <string name="title_melvin">MELVIN AI // CORE</string>
+    <string name="subtitle_chip">Helio X20 • MT6797</string>
+    <string name="status_connecting">Поиск ядра Мелвина (127.0.0.1:5000)...</string>
+    <string name="status_offline">Ядро Мелвина не отвечает на порту 5000</string>
+    <string name="btn_retry">Повторить подключение</string>
+    <string name="btn_start_daemon">Запустить демон Melvin</string>
+    <string name="btn_screen_wake">Экран вкл</string>
+    <string name="voice_prompt">Говорите в микрофон...</string>
+</resources>

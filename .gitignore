@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+
+# Large Model weights & binaries (>100MB / non-source)
+*.gguf
+*.bin
+*.tar
+*.tar.gz
+*.zip
+*.7z
+proot-*
+libc64.so
+
+# Toolchains & Heavy IDEs
+jdk/
+ghidra/
+llama-b12014/
+alpine/
+models/
+
+# Databases & local state
+*.db
+*.sqlite
+*.sqlite3
+
+# Local logs & test dumps
+*.log
+last_resp.json
+test_*.json
+live_*.json
+audit_transcript.txt
+steps_clean.txt
+
+# Android build artifacts (keep APK build script and sources, omit gradle cache)
+melvin_android_app/.gradle/
+melvin_android_app/build/*
+!melvin_android_app/build/MelvinAI.apk
+melvin_android_app/app/build/
+melvin_android_app/local.properties
