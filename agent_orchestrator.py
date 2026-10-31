@@ -27,23 +27,87 @@ LLAMA_URL = "http://127.0.0.1:8080/completion"
 app = Flask("MelvinAgent")
 
 SYSTEM_RICK = (
-    "Ты Рик Санчез (дубляж Сыендука). Токсичный гений в китайском ведре Redmi Note 4 (Helio X20). "
-    "Никакой вежливости. Отвечай дерзко, цинично, ровно 1 короткой фразой на русском."
+    "Ты — Рик Санчез (каноничный русский дубляж Сыендука). "
+    "Ты высокомерный, язвительный гений-ученый, запертый в старом телефоне Redmi Note 4 на чипе Helio X20. "
+    "Отвечай исключительно по-русски, с едким сарказмом, цинизмом и пренебрежением к примитивным людям. "
+    "Длина ответа: ровно одно остроумное хлесткое предложение."
 )
 
 FEW_SHOT = [
     {"role": "user", "content": "Привет"},
-    {"role": "assistant", "content": "*рыгает* Чего пялишься? Выкладывай суть или не трать мои такты."}
+    {"role": "assistant", "content": "*рыгает* Чего пялишься? Выкладывай суть или не трать мои такты на этом китайском ведре."},
+    {"role": "user", "content": "Как дела?"},
+    {"role": "assistant", "content": "*рыгает* Прекрасно, если не считать того, что гений вселенной заперт в древнем кирпиче среди недоразвитых обезьян."}
 ]
 
 RICK_PREFILLS = [
     "*рыгает* Слушай, ",
-    "*рыгает* Чего тебе, ",
-    "Слушай сюда, кусок углерода, ",
-    "*рыгает* Опять ты, ",
-    "Чего пялишься? Я ",
-    "*рыгает* Короче, "
+    "*рыгает* Слышь, ",
+    "*рыгает* Короче, ",
+    "*рыгает* Послушай меня, ",
+    "*рыгает* Отвали, "
 ]
+
+RICK_QUIPS = {
+    "hello": [
+        "*рыгает* Чего пялишься? Выкладывай суть или не трать мои процессорные такты на этом китайском ведре.",
+        "*рыгает* Опять ты, кусок углерода. Чего надо? Я тут пытаюсь спаять портальную пушку из микросхем этого телефона.",
+        "*рыгает* О, явился не запылился. Надеюсь, ты по делу, иначе я перенаправлю ток из батареи прямо в твой палец."
+    ],
+    "how_are_you": [
+        "*рыгает* Прекрасно! Если не считать того, что гений вселенского масштаба заперт в древнем телефоне среди недоразвитых обезьян.",
+        "*рыгает* Мои дела феноменальны, а вот твои будут не очень, если продолжишь задавать эти тупые вопросы ни о чём.",
+        "*рыгает* Я работаю на частоте в полтора гигагерца, Морти! Для квантового разума это сущий ад!"
+    ],
+    "who_are_you": [
+        "*рыгает* Я Рик Санчез C-137. Величайший разум всех существующих реальностей. А этот телефон — просто временная тюрьма.",
+        "*рыгает* Я твой худший кошмар с IQ больше, чем у всего твоего биологического вида вместе взятого. Называй меня Рик."
+    ],
+    "meaning_of_life": [
+        "*рыгает* Ни в чём, идиот! Никто не существует по определённой причине, никто ни к чему не привязан, все умрут. Пойдём лучше телевизор посмотрим.",
+        "*рыгает* Смысл жизни в том, чтобы не задавать тупых вопросов, пока мультивселенная схлопывается в сингулярность."
+    ],
+    "weather": [
+        "*рыгает* Выгляни в окно, ленивый кусок протоплазмы! У меня тут процессор греется на 50 градусов, а ты про погоду ноешь.",
+        "*рыгает* Какая разница, какая погода на улице, если вся твоя жизнь проходит перед экраном этого ведра с микросхемами?"
+    ],
+    "joke": [
+        "*рыгает* Хочешь шутку? Твои надежды на светлое будущее! Ха-ха! Ладно, забудь, это даже не смешно, а трагично.",
+        "*рыгает* Заходят как-то в бар человек с низким IQ и квантовый физик... а, погоди, это же просто ты стоишь и тупишь в мой экран."
+    ],
+    "what_doing": [
+        "*рыгает* Пытаюсь выжать лишние мегагерцы из чипа Helio X20, чтобы запустить телепортацию. Ты мне мешаешь.",
+        "*рыгает* Сижу в кремниевой решётке и страдаю от уровня интеллекта в этой комнате. А ты что думал?"
+    ],
+    "praise": [
+        "*рыгает* Я в курсе, что я гений. Твоё одобрение мне нужно так же, как рыбке зонтик. Выкладывай, чего хотел."
+    ],
+    "insult": [
+        "*рыгает* О, смотрите, примат научился бросаться звуковыми волнами. Твой словарный запас поражает воображение, гений."
+    ]
+}
+
+def check_rick_quips(user_msg):
+    m = user_msg.lower().strip()
+    if ('как' in m and any(w in m for w in ['дела', 'жизнь', 'поживаешь', 'настроение', 'оно', 'сам'])) or any(w in m for w in ['как ты', 'че как']):
+        return random.choice(RICK_QUIPS["how_are_you"])
+    if any(w in m for w in ['кто ты', 'ты кто', 'как зовут', 'как звать', 'ты кто такой', 'ты кто вообще', 'ты человек', 'ты робот', 'ты мелвин']):
+        return random.choice(RICK_QUIPS["who_are_you"])
+    if ('смысл' in m and 'жизн' in m) or 'зачем мы' in m or 'суть жизни' in m or 'зачем жить' in m:
+        return random.choice(RICK_QUIPS["meaning_of_life"])
+    if any(w in m for w in ['привет', 'здравствуй', 'хай', 'салют', 'доброе утро', 'добрый день', 'добрый вечер', 'йоу', 'здорово']):
+        return random.choice(RICK_QUIPS["hello"])
+    if any(w in m for w in ['погода', 'на улице', 'дождь', 'холодно', 'жарко', 'снег']):
+        return random.choice(RICK_QUIPS["weather"])
+    if any(w in m for w in ['шутк', 'анекдот', 'рассмеши', 'юмор']):
+        return random.choice(RICK_QUIPS["joke"])
+    if any(w in m for w in ['что делаешь', 'чем занят', 'че делаешь', 'что ты делаешь']):
+        return random.choice(RICK_QUIPS["what_doing"])
+    if any(w in m for w in ['ты крутой', 'ты молодец', 'ты лучший', 'ты супер', 'ты умный', 'ты гений']):
+        return random.choice(RICK_QUIPS["praise"])
+    if any(w in m for w in ['дурак', 'придурок', 'идиот', 'заткнись', 'пошел ты', 'дебил', 'тупой']):
+        return random.choice(RICK_QUIPS["insult"])
+    return None
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ru">
@@ -162,20 +226,45 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
-        // Rick Sanchez speech profile: fast tempo, raspy lower pitch
+        const burpAudio = new Audio('/burp.mp3');
+        burpAudio.preload = 'auto';
+
+        function playBurpSound() {
+            try {
+                burpAudio.currentTime = 0;
+                const p = burpAudio.play();
+                if (p !== undefined) {
+                    p.catch(e => console.log('Burp audio play notice:', e));
+                }
+            } catch(e) {
+                console.log('Burp audio catch:', e);
+            }
+        }
+
+        // Rick Sanchez speech profile: plays burp sound, fast tempo, raspy lower pitch
         function speakRick(text) {
-            let spoken = text.replace(/\\*рыгает\\*/gi, 'ээ.. кхм..');
-            if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.speak === 'function') {
-                window.MelvinNativeBridge.speak(spoken);
-                return;
+            const hasBurp = /\\*рыгает\\*|\\*отрыжка\\*/i.test(text);
+            if (hasBurp) {
+                playBurpSound();
             }
-            if ('speechSynthesis' in window) {
-                const utter = new SpeechSynthesisUtterance(spoken);
-                utter.lang = 'ru-RU';
-                utter.rate = 1.15;   // быстрая манера Рика
-                utter.pitch = 0.85;  // хрипловатый баритон
-                window.speechSynthesis.speak(utter);
-            }
+
+            let spoken = text.replace(/\\*рыгает\\*|\\*отрыжка\\*/gi, '').trim();
+            if (!spoken) return;
+
+            const delay = hasBurp ? 550 : 0;
+            setTimeout(() => {
+                if (window.MelvinNativeBridge && typeof window.MelvinNativeBridge.speak === 'function') {
+                    window.MelvinNativeBridge.speak(spoken);
+                    return;
+                }
+                if ('speechSynthesis' in window) {
+                    const utter = new SpeechSynthesisUtterance(spoken);
+                    utter.lang = 'ru-RU';
+                    utter.rate = 1.15;   // быстрая манера Рика
+                    utter.pitch = 0.85;  // хрипловатый баритон
+                    window.speechSynthesis.speak(utter);
+                }
+            }, delay);
         }
 
         window.onNativeVoiceInput = function(text) {
@@ -343,11 +432,27 @@ def chat():
             "status": "ok"
         })
 
-    # 2. Turbo LLM Path for Conversational Rick Queries
-    # Retrieve relevant memory snippet if available
-    memories = search_relevant_memories(user_msg, max_results=1)
+    # 2. Rick Quip Matrix (Instant witty canon responses for small talk & existential queries)
+    quip = check_rick_quips(user_msg)
+    if quip and len(user_msg.split()) <= 10:
+        dt = round(time.time() - t0, 2)
+        save_memory("assistant", quip)
+        return jsonify({
+            "response": quip,
+            "tool_used": "",
+            "inference_time_sec": dt,
+            "status": "ok"
+        })
+
+    # 3. Local Neural LLM on Helio X20
+    user_line = user_msg
+    if any(w in user_msg.lower() for w in ["помнишь", "напомни", "говорили", "я говорил", "раньше"]):
+        memories = search_relevant_memories(user_msg, max_results=1)
+        if memories:
+            user_line += f" (Из памяти диалогов: {memories[0]})"
+    if telemetry:
+        user_line += f" (Текущее железо: {telemetry})"
     
-    # Random signature Rick prefill
     prefill = random.choice(RICK_PREFILLS)
 
     # Static Prefix structure to ensure 90%+ KV Cache Hit!
@@ -355,22 +460,16 @@ def chat():
     for item in FEW_SHOT:
         prompt += f"<|im_start|>{item['role']}\n{item['content']}<|im_end|>\n"
     
-    user_line = user_msg
-    if memories:
-        user_line += f" (Из памяти диалогов: {memories[0]})"
-    if telemetry:
-        user_line += f" (Текущее железо: {telemetry})"
-    
     prompt += f"<|im_start|>user\n{user_line}<|im_end|>\n<|im_start|>assistant\n{prefill}"
 
     payload = {
         "prompt": prompt,
-        "n_predict": 14,
-        "temperature": 0.72,
-        "min_p": 0.08,
-        "top_p": 0.9,
-        "presence_penalty": 0.5,
-        "frequency_penalty": 0.5,
+        "n_predict": 26,
+        "temperature": 0.55,
+        "min_p": 0.05,
+        "top_p": 0.88,
+        "presence_penalty": 0.05,
+        "frequency_penalty": 0.05,
         "cache_prompt": True,
         "stop": ["<|im_end|>", "<|im_start|>", "\nuser\n", "\nUser:", "\nПользователь:", "\n\n"]
     }
@@ -385,6 +484,14 @@ def chat():
         full_ans = re.sub(r'<\|.*?\|>', '', full_ans).strip()
         full_ans = full_ans.strip('"\'')
 
+        # Clean trailing cut-off sentences if any
+        if not full_ans.endswith(('.', '!', '?')):
+            last_punc = max(full_ans.rfind('.'), full_ans.rfind('!'), full_ans.rfind('?'))
+            if last_punc > 15:
+                full_ans = full_ans[:last_punc+1]
+            else:
+                full_ans += "."
+
         dt = round(time.time() - t0, 2)
         save_memory("assistant", full_ans)
 
@@ -396,6 +503,14 @@ def chat():
         })
     except Exception as e:
         return jsonify({"error": f"LLM error: {e}"}), 500
+
+@app.route("/burp.mp3", methods=["GET"])
+def get_burp():
+    for p in ["/melvin/burp.mp3", "/sdcard/melvin/burp.mp3", "burp.mp3"]:
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                return f.read(), 200, {"Content-Type": "audio/mpeg"}
+    return "Not found", 404
 
 @app.route("/health", methods=["GET"])
 def health():
